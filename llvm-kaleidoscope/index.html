@@ -27,13 +27,26 @@
   </style>
 </head>
 <body>
-<h1 id="hello">Hello</h1>
-<h2 id="llvm-kaleidoscope-tutorial">LLVM Kaleidoscope Tutorial</h2>
-<p>The venerable <a href="https://releases.llvm.org/8.0.0/docs/tutorial/OCamlLangImpl1.html">LLVM Kaleidoscope Tutorial</a> is a nice introduction to both <a href="https://ocaml.org">OCaml</a> and <a href="https://llvm.org">LLVM</a> but it implements parsing &amp; lexing using the OCaml stream parsers, which are are no longer a feature of current OCaml versions.</p>
-<p>Of course, you don’t need stream parser to parse stuff in OCamL, there is <code>ocamllex</code>, <code>ocamlyacc</code>/<code>menhir</code> for traditional lexer/parser approach.</p>
-<p>There are many parser combinator libraries, just do a search on <a href="https://opam.ocaml.org/packages">OPAM</a>.</p>
-<p>You can (probably) still use the <code>Camlp4</code> alternative/successor/predecessor <a href="https://camlp5.github.io/">Camlp5</a></p>
-<p>Or you can read my attempt to do the same using just <code>ocamllex</code> and recursive descent parsing techniques.</p>
-<p><a href="https://vrotaru.github.io/llvm-kaleidoscope" class="uri">https://vrotaru.github.io/llvm-kaleidoscope</a></p>
+<h1 id="kaleidoscope-introduction">Kaleidoscope Introduction<a href="#fn1" class="footnote-ref" id="fnref1" role="doc-noteref"><sup>1</sup></a></h1>
+<h2 id="tutorial-introduction">Tutorial introduction</h2>
+<p>Welcome to the “Implementing a language with LLVM” tutorial. This tutorial runs through the implementation of a simple language, showing how fun and easy it can be. This tutorial will get you up and started as well as help to build a framework you can extend to other languages. The code in this tutorial can also be used as a playground to hack on other LLVM specific things.</p>
+<p>The goal of this tutorial is to progressively unveil our language, describing how it is built up over time. This will let us cover a fairly broad range of language design and LLVM-specific usage issues, showing and explaining the code for it all along the way, without overwhelming you with tons of details up front.</p>
+<p>It is useful to point out ahead of time that this tutorial is really about teaching compiler techniques and LLVM specifically, not about teaching modern and sane software engineering principles. In practice, this means that we’ll take a number of shortcuts to simplify the exposition. For example, the code leaks memory, uses global variables all over the place, doesn’t use nice design patterns like <a href="http://en.wikipedia.org/wiki/Visitor_pattern">visitors</a>, etc… but it is very simple. If you dig in and use the code as a basis for future projects, fixing these deficiencies shouldn’t be hard.</p>
+<p>I’ve tried to put this tutorial together in a way that makes chapters easy to skip over if you are already familiar with or are uninterested in the various pieces. The structure of the tutorial is:</p>
+<ul>
+<li>
+<p><a href="chapter01.html">Chapter #1</a> Introduction to the Kaleidoscope language, and the definition of its Lexer - This shows where we are going and the basic functionality that we want it to do. In order to make this tutorial maximally understandable and hackable, we choose to implement the parser in Objective Caml instead of using parser generators. LLVM obviously works just fine with such tools, feel free to use one if you prefer.<a href="#fn2" class="footnote-ref" id="fnref2" role="doc-noteref"><sup>2</sup></a></p>
+</li>
+<li>
+<p><a href="chapter02.html">Chapter #2</a> Implementing a Parser and AST - With the lexer in place, we can talk about parsing techniques and basic AST construction. This tutorial describes recursive descent parsing and operator precedence parsing. Nothing in Chapters 1 or 2 is LLVM-specific, the code doesn’t even link in LLVM at this point. :)</p>
+</li>
+</ul>
+<section class="footnotes" role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1" role="doc-endnote"><p>Based on <a href="https://releases.llvm.org/8.0.0/docs/tutorial/OCamlLangImpl1.html" class="uri">https://releases.llvm.org/8.0.0/docs/tutorial/OCamlLangImpl1.html</a> with minimal changes.<a href="#fnref1" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+<li id="fn2" role="doc-endnote"><p>The original tutorial used stream parsers, which are no longer part of the OCaml language<a href="#fnref2" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section>
 </body>
 </html>
