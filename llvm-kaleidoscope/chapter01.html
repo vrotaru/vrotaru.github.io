@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
-  <title>-</title>
+  <meta name="author" content />
+  <title>Language Definition and Lexer</title>
   <style>
     code{white-space: pre-wrap;}
     span.smallcaps{font-variant: small-caps;}
@@ -90,6 +91,10 @@
   </style>
 </head>
 <body>
+<header id="title-block-header">
+<h1 class="title">Language Definition and Lexer</h1>
+<p class="author"></p>
+</header>
 <h1 id="the-basic-language">The Basic Language</h1>
 <p>This tutorial will be illustrated with a toy language that we’ll call “<a href="http://en.wikipedia.org/wiki/Kaleidoscope">Kaleidoscope</a>” (derived from “meaning beautiful, form, and view”). Kaleidoscope is a procedural language that allows you to define functions, use conditionals, math, etc. Over the course of the tutorial, we’ll extend Kaleidoscope to support the if/then/else construct, a for loop, user defined operators, JIT compilation with a simple command line interface, etc.</p>
 <p>Because we want to keep things simple, the only datatype in Kaleidoscope is a 64-bit floating point type (aka ‘float’ in OCaml parlance). As such, all values are implicitly double precision and the language doesn’t require type declarations. This gives the language a very nice and simple syntax. For example, the following simple example computes <a href="http://en.wikipedia.org/wiki/Fibonacci_number">Fibonacci numbers</a>:</p>
@@ -102,13 +107,13 @@ def fib(x)
 
 # This expression will compute the 40th number.
 fib(40)</code></pre>
-<p>We also allow Kaleidoscope to call into standard library functions (the LLVM JIT makes this completely trivial). This means that you can use the ‘extern’ keyword to define a function before you use it (this is also useful for mutually recursive functions). For example:</p>
+<p>We also allow Kaleidoscope to call into standard library functions (the LLVM JIT makes this completely trivial). This means that you can use the <code>extern</code> keyword to define a function before you use it (this is also useful for mutually recursive functions). For example:</p>
 <pre><code>extern sin(arg);
 extern cos(arg);
 extern atan2(arg1 arg2);
 
 atan2(sin(.4), cos(42))</code></pre>
-<p>A more interesting example is included in Chapter 6 where we write a little Kaleidoscope application that <a href="/home/rv/Code/llvm-kaleidoscope-tutorial/chapter06.md#kicking-the-tires">displays a Mandelbrot Set</a> at various levels of magnification.</p>
+<p>A more interesting example is included in Chapter 6 where we write a little Kaleidoscope application that <a href="#">displays a Mandelbrot Set</a> at various levels of magnification.</p>
 <p>Lets dive into the implementation of this language!</p>
 <h2 id="the-lexer">The Lexer</h2>
 <p>When it comes to implementing a language, the first thing needed is the ability to process a text file and recognize what it says. The traditional way to do this is to use a “<a href="http://en.wikipedia.org/wiki/Lexical_analysis">lexer</a>” (aka ‘scanner’) to break the input up into “tokens”. Each token returned by the lexer includes a token code and potentially some metadata (e.g. the numeric value of a number).</p>
@@ -134,7 +139,7 @@ atan2(sin(.4), cos(42))</code></pre>
 <span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%f&quot;</span> f</span>
 <span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  | Kwd c    -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%c&quot;</span> c</span>
 <span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="er">}</span></span></code></pre></div>
-<p>Each token returned by our lexer will be one of the token variant values. An unknown character like ‘+’ will be returned as <code>Lexer.Kwd &#39;+&#39;</code>. If the current token is an identifier, the value will be <code>Lexer.Ident s</code>. If the current token is a numeric literal (like 1.0), the value will be <code>Lexer.Number 1.0</code>.</p>
+<p>Each token returned by our lexer will be one of the token variant values. An unknown character like ‘+’ will be returned as <code>Lexer.Kwd &#39;+&#39;</code>. If the current token is an identifier, the value will be <code class="sourceCode ocaml">Lexer.Ident s</code>. If the current token is a numeric literal (like 1.0), the value will be <code class="sourceCode ocaml">Lexer.Number <span class="fl">1.0</span></code>.</p>
 <p>It is convenient to use named regular expression in OCaml lexers. Let’s just do that</p>
 <div class="sourceCode" id="cb5"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> alpha = [<span class="ch">&#39;a&#39;</span>-<span class="ch">&#39;z&#39;</span> <span class="ch">&#39;A&#39;</span>-<span class="ch">&#39;Z&#39;</span>]</span>
 <span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> digit = [<span class="ch">&#39;0&#39;</span>-<span class="ch">&#39;9&#39;</span>]</span></code></pre></div>
@@ -147,9 +152,9 @@ atan2(sin(.4), cos(42))</code></pre>
 <span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  | alpha+ <span class="kw">as</span> s                { Ident s }</span></code></pre></div>
 <p>The order of lexer alternatives matters, so the more specific one should always go before the more general alternatives, or those will never be matched. So that’s why we have <code>&quot;def&quot;</code> and <code>&quot;extern&quot;</code> go before <code>alpha+</code>.</p>
 <p>The <code>as id</code> lexer syntax return the string which matches the alternative regular expression in <code>id</code> variable.</p>
-<p><code>Number f</code> is also easy</p>
+<p><code class="sourceCode ocaml">Number f</code> is also easy</p>
 <div class="sourceCode" id="cb8"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>  | digit+ (<span class="ch">&#39;.&#39;</span> digit<span class="er">*)</span>? <span class="kw">as</span> f  { Number (<span class="dt">float_of_string</span> f) }</span></code></pre></div>
-<p>Before we define <code>Kwd c</code> which should accept any char we need to deal with comments. We will have a special rule to handle the comments (From <code>#</code> to end of line), so let&#39;s add an alternative for it before we add the <code>Kwd c</code> one, so that the character <code>#</code> is not <em>eaten</em> by the <code>Kwd</code> alternative.</p>
+<p>Before we define <code class="sourceCode ocaml">Kwd c</code> which should accept any char we need to deal with comments. We will have a special rule to handle the comments (From <code>#</code> to end of line), so let&#39;s add an alternative for it before we add the <code>Kwd c</code> one, so that the character <code>#</code> is not <em>eaten</em> by the <code>Kwd</code> alternative.</p>
 <div class="sourceCode" id="cb9"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>  | <span class="ch">&#39;#&#39;</span>                        { comment lexbuf }</span></code></pre></div>
 <p>Where <code>comment</code> is another lexer rule which will be defined later. Now we can add the alternative for <code>Kwd c</code></p>
 <div class="sourceCode" id="cb10"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>  | _ <span class="kw">as</span> c                     { Kwd c }</span></code></pre></div>
@@ -167,11 +172,11 @@ atan2(sin(.4), cos(42))</code></pre>
 <p>That will produce a file <code>lexer.ml</code> which will be our lexer.</p>
 <h2 id="trying-it-out">Trying it out</h2>
 <p>We will also write a small utility <code>dump.ml</code> which will print each token of a <code>.kaleidoscope</code> file on its own line using the formatter defined in the lexer.<a href="#fn4" class="footnote-ref" id="fnref4" role="doc-noteref"><sup>4</sup></a></p>
-<p>First we need to create <code>lexbuf</code> value which will be passed to <code>Lexer.token</code> function</p>
+<p>First we need to create <code class="sourceCode ocaml">lexbuf</code> value which will be passed to <code class="sourceCode ocaml">Lexer.token</code> function.</p>
 <div class="sourceCode" id="cb14"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> dump filename =</span>
 <span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ch = <span class="dt">open_in</span> filename <span class="kw">in</span></span>
 <span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> lexbuf = <span class="dt">Lexing</span>.from_channel ch <span class="kw">in</span></span></code></pre></div>
-<p>Next we define a recursive <code>loop</code> function which will consume the <code>lexbuf</code> and print all tokens to <code>stdout</code></p>
+<p>Next we define a recursive <code class="sourceCode ocaml">loop</code> function which will consume the <code class="sourceCode ocaml">lexbuf</code> and print all tokens to <code class="sourceCode ocaml"><span class="dt">stdout</span></code></p>
 <div class="sourceCode" id="cb15"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> loop lexbuf =</span>
 <span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> Lexer.token lexbuf <span class="kw">with</span></span>
 <span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    | token -&gt; <span class="dt">Format</span>.printf <span class="st">&quot;%a</span><span class="ch">\n</span><span class="st">&quot;</span> Lexer.pp token;</span>
@@ -181,16 +186,16 @@ atan2(sin(.4), cos(42))</code></pre>
 <p>Next we call it and when it finishes, close the input stream.</p>
 <div class="sourceCode" id="cb16"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>  loop lexbuf;</span>
 <span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">close_in</span> ch</span></code></pre></div>
-<p>Now we define our <code>main</code> function<a href="#fn5" class="footnote-ref" id="fnref5" role="doc-noteref"><sup>5</sup></a></p>
+<p>Now we define our <code class="sourceCode ocaml">main</code> function<a href="#fn5" class="footnote-ref" id="fnref5" role="doc-noteref"><sup>5</sup></a></p>
 <div class="sourceCode" id="cb17"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> main () =</span>
 <span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> n = <span class="dt">Array</span>.length <span class="dt">Sys</span>.argv <span class="kw">in</span></span>
 <span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">for</span> i = <span class="dv">1</span> <span class="kw">to</span> n - <span class="dv">1</span> <span class="kw">do</span></span>
-<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    dump <span class="dt">Sys</span>.argv.(i) </span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    dump <span class="dt">Sys</span>.argv.(i) {</span>
 <span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">done</span></span></code></pre></div>
 <p>and call it</p>
 <div class="sourceCode" id="cb18"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = main ()</span></code></pre></div>
 <p>Let’s try it.</p>
-<pre class="out"><code>$ ocamlc -o dump lexer.ml dump.ml
+<pre><code>$ ocamlc -o dump lexer.ml dump.ml
 $ ./dump def.kaleidoscope
 def
 fib
@@ -221,13 +226,13 @@ fib
 (
 40.000000
 )</code></pre>
-<p><a href="chapter02.html">Next: Implementing a Parser and AST</a></p>
+<p><a href="/home/rv/Code/llvm-kaleidoscope-tutorial/chapter02.html">Next: Implementing a Parser and AST</a></p>
 <section class="footnotes" role="doc-endnotes">
 <hr />
 <ol>
 <li id="fn1" role="doc-endnote"><p><code>.mll</code> is the standard extension for OCaml lexers<a href="#fnref1" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
 <li id="fn2" role="doc-endnote"><p>Each OCaml lexer must start with prologue delimited by <code>{</code> and <code>}</code> and which may contain arbitrary OCaml code<a href="#fnref2" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
-<li id="fn3" role="doc-endnote"><p>Formatters a special type of functions used by <code>Printf</code> module to pretty-print values of known and user defined types<a href="#fnref3" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+<li id="fn3" role="doc-endnote"><p>Formatters a special type of functions used by <code class="sourceCode ocaml"><span class="dt">Printf</span></code> / <code class="sourceCode ocaml"><span class="dt">Format</span></code> module to pretty-print values of known and user defined types<a href="#fnref3" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
 <li id="fn4" role="doc-endnote"><p>Dealing with I/O exceptions and properly closing the opened streams is important, but we will ignore it here for the sake of simplicity<a href="#fnref4" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
 <li id="fn5" role="doc-endnote"><p>We ignore the 0th element <code>Sys.argv</code> since it holds the program name<a href="#fnref5" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
 </ol>

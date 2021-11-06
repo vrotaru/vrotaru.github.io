@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content />
-  <title>Implementing a Parser and AST</title>
+  <title>Code generation to LLVM IR</title>
   <style>
     code{white-space: pre-wrap;}
     span.smallcaps{font-variant: small-caps;}
@@ -92,600 +92,158 @@
 </head>
 <body>
 <header id="title-block-header">
-<h1 class="title">Implementing a Parser and AST</h1>
+<h1 class="title">Code generation to LLVM IR</h1>
 <p class="author"></p>
 </header>
-<h2 id="introduction">Introduction</h2>
-<p>Welcome to Chapter 2 of the “Implementing a language with LLVM in Objective Caml” tutorial. This chapter shows you how to use the lexer, built in Chapter 1, to build a full parser for our Kaleidoscope language. Once we have a parser, we’ll define and build an Abstract Syntax Tree (AST).</p>
-<p>The parser we will build uses Recursive Descent Parsing and for the sake of simplicity treats all binary operations as left-associative. Before we get to parsing though, lets talk about the output of the parser: the Abstract Syntax Tree.</p>
-<h2 id="the-abstract-syntax-tree-ast">The Abstract Syntax Tree (AST)</h2>
-<p>The AST for a program captures its behavior in such a way that it is easy for later stages of the compiler (e.g. code generation) to interpret. We basically want one object for each construct in the language, and the AST should closely model the language. In Kaleidoscope, we have expressions, a prototype, and a function object. We’ll start with expressions first:</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* expr - Base type for all expression nodes. *)</span></span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> expr =</span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for numeric literals like &quot;1.0&quot;. *)</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>  | Number <span class="kw">of</span> <span class="dt">float</span></span></code></pre></div>
-<p>The code above shows the definition of the base <code class="sourceCode ocaml">expr</code> type and one variant which we will use for numeric literals. The important thing to note about this code is that the <code class="sourceCode ocaml">Number</code> variant captures the numeric value of the literal. This allows later phases of the compiler to know what the stored numeric value is.</p>
-<p>Right now we only create the AST, so there are no useful functions on them. Here are the other expression AST node definitions that we’ll use in the basic form of the Kaleidoscope language:</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for referencing a variable, like &quot;a&quot;. *)</span></span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  | Variable <span class="kw">of</span> <span class="dt">string</span></span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for a binary operator. *)</span></span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  | Binary <span class="kw">of</span> <span class="dt">char</span> * expr * expr</span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for function calls. *)</span></span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  | Call <span class="kw">of</span> <span class="dt">string</span> * expr <span class="dt">array</span></span></code></pre></div>
-<p>This is all (intentionally) rather straight-forward: variables capture the variable name, binary operators capture their opcode (e.g. ‘+’), and calls capture a function name as well as a list of any argument expressions. One thing that is nice about our AST is that it captures the language features without talking about the syntax of the language. Note that there is no discussion about precedence of binary operators, lexical structure, etc.</p>
-<p>For our basic language, these are all of the expression nodes we’ll define. Because it doesn’t have conditional control flow, it isn’t Turing-complete; we’ll fix that in a later installment. The two things we need next are a way to talk about the interface to a function, and a way to talk about functions themselves:</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* proto - This type represents the &quot;prototype&quot; for a function, which captures</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="co"> * its name, and its argument names (thus implicitly the number of arguments the</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="co"> * function takes). *)</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> proto = Prototype <span class="kw">of</span> <span class="dt">string</span> * <span class="dt">string</span> <span class="dt">array</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="co">(* func - This type represents a function definition itself. *)</span></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> func = Function <span class="kw">of</span> proto * expr</span></code></pre></div>
-<p>In Kaleidoscope, functions are typed with just a count of their arguments. Since all values are double precision floating point, the type of each argument doesn’t need to be stored anywhere. In a more aggressive and realistic language, the “expr” variants would probably have a type field.</p>
-<p>With this scaffolding, we can now talk about parsing expressions and function bodies in Kaleidoscope.</p>
-<h2 id="parser-basics">Parser Basics</h2>
-<p>Now that we have an AST to build, we need to define the parser code to build it. The idea here is that we want to parse something like “x+y” (which is returned as three tokens by the lexer) into an AST that could be generated with calls like this:</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> x = Variable <span class="st">&quot;x&quot;</span> <span class="kw">in</span></span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> y = Variable <span class="st">&quot;y&quot;</span> <span class="kw">in</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> result = Binary (<span class="ch">&#39;+&#39;</span>, x, y) <span class="kw">in</span></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>...</span></code></pre></div>
-<p>For convenience we start by importing the <code class="sourceCode ocaml">Lexer.t</code> type into our parser and renaming it to <code class="sourceCode ocaml">token</code>. We will also import the <code class="sourceCode ocaml">Lexer.t</code> formatter and rename it to <code class="sourceCode ocaml">token_pp</code></p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> token = Lexer.t =</span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  | Def | Extern</span>
-<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  | Ident <span class="kw">of</span> <span class="dt">string</span> | Number <span class="kw">of</span> <span class="dt">float</span></span>
-<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="kw">of</span> <span class="dt">char</span></span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> token_pp = Lexer.pp</span></code></pre></div>
-<p>For error handling we will define 2 exceptions:</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> Error <span class="kw">of</span> token</span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> <span class="dt">Failure</span> <span class="kw">of</span> <span class="dt">string</span> * token</span></code></pre></div>
-<p><code class="sourceCode ocaml">Error</code> is raised when the first token of the input does not match, but it (the token) has not been <em>consumed</em>. <code class="sourceCode ocaml"><span class="dt">Failure</span></code> is raised if some input was already consumed by the parser function so any mismatch becomes fatal.</p>
-<p>The error recovery in our parser will not be the best and is not particular user-friendly, but it will be enough for our tutorial. These exceptions make it easier to handle errors in routines that have various return types.</p>
-<p>We will also register those exceptions with <code class="sourceCode ocaml"><span class="dt">Printexc</span></code> module, and we will use that later in our top loop.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
-<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> Error t</span>
-<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;Unexpected token: %a&quot;</span> token_pp t))</span>
-<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
-<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> <span class="dt">Failure</span> (message, token)</span>
-<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;%s: %a&quot;</span> message token_pp token))</span></code></pre></div>
-<h3 id="the-missing-peek-in-ocaml-lexers.">The missing <code>peek</code> in OCaml lexers.</h3>
-<p>But before we start we need one more bit of machinery. OCaml lexers, do not have a <em>lookahead</em>/<em>peek</em> feature. When the lexer returns a token, it’s position in the input advances and the lexer is ready to return next token. That is problem when a token can start for several alternatives. Example: in <code>a + b</code> <code>a</code> should be parsed as a variable and in <code>a(b)</code> it should be parsed as function call.</p>
-<p>One possible workaround is to pass both the current token and the lexbuf to our parser functions, but this quickly became tedious and hard to read.</p>
-<p>So we will create a new type which wraps <code class="sourceCode ocaml"><span class="dt">Lexing</span>.lexbuf</code></p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> ll1 = <span class="co">(* Hint: See LL1 grammars *)</span></span>
-<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>  { <span class="kw">mutable</span> lookahead : token <span class="dt">option</span>;</span>
-<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    lexbuf            : <span class="dt">Lexing</span>.lexbuf;</span>
-<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1 lexbuf = { lookahead = <span class="dt">None</span>; lexbuf }</span></code></pre></div>
-<p>Yes, you can have types and values with the same name in OCaml, which is generally a pun-friendly language.</p>
-<p>The next 2 functions should be self-explanatory</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_string str = ll1 @@ <span class="dt">Lexing</span>.from_string str</span>
-<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_channel ch = ll1 @@ <span class="dt">Lexing</span>.from_channel ch</span></code></pre></div>
-<p>We will also add some convenience functions, starting with the <code class="sourceCode ocaml">next</code> and <code class="sourceCode ocaml">peek</code> functions.</p>
-<div class="sourceCode" id="cb10"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> next ll1 =</span>
-<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
-<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
-<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; ll1.lookahead &lt;- <span class="dt">None</span>; token</span>
-<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; Lexer.token lexbuf</span>
-<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> peek ll1 =</span>
-<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
-<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
-<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; token</span>
-<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; <span class="kw">let</span> token = Lexer.token lexbuf <span class="kw">in</span></span>
-<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>    ll1.lookahead &lt;- <span class="dt">Some</span> token;</span>
-<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>    token</span></code></pre></div>
-<p>The <code class="sourceCode ocaml">drop</code> function is strictly not necessary, but can be convenient so let’s add it too. And we’ll need <code class="sourceCode ocaml">require</code> which will save us a fair amount of repetition.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> drop ll1 = <span class="dt">ignore</span> @@ next ll1</span>
-<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> require ?msg token ll1 =</span>
-<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> token&#39; = next ll1 <span class="kw">in</span></span>
-<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> token &lt;&gt; token&#39; <span class="kw">then</span></span>
-<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> message =  <span class="kw">match</span> msg <span class="kw">with</span></span>
-<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> message -&gt; message</span>
-<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span> -&gt; <span class="dt">Format</span>.asprintf <span class="st">&quot;%a expected&quot;</span> token_pp token <span class="kw">in</span></span>
-<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>    <span class="dt">raise</span> @@ <span class="dt">Failure</span> (message, token&#39;)</span></code></pre></div>
-<p>With these basic types, functions, and exceptions, we can implement the first piece of our grammar.</p>
-<p>Assuming that we know how to parse something how do we parse a list of somethings separated by commas? If the <code class="sourceCode ocaml"><span class="kw">parser</span></code> function will throw <code class="sourceCode ocaml">Error</code> when it fails to parse the input, than we may write it like this:</p>
-<div class="sourceCode" id="cb12"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_list <span class="kw">parser</span> ll1 =</span>
-<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">try</span></span>
-<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> e = <span class="kw">parser</span> ll1 <span class="kw">in</span></span>
-<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;,&#39;</span> -&gt; drop ll1; e :: parse_list <span class="kw">parser</span> ll1</span>
-<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>      | _  -&gt; [e]</span>
-<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">with</span> Error _ -&gt; []</span></code></pre></div>
-<h2 id="basic-expression-parsing">Basic Expression parsing</h2>
-<p>We start with numeric literals, because they are the simplest to process. For each production in our grammar, we’ll define a function which parses that production. We call this class of expressions “primary” expressions, for reasons that will become more clear later in the tutorial.</p>
-<div class="sourceCode" id="cb13"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* primary</span></span>
-<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= numberexpr</span></span>
-<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= parenexpr </span></span>
-<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier</span></span>
-<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier(expr list)</span></span>
-<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a><span class="co">*)</span></span>
-<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_primary parse_expr ll1 =</span>
-<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span></code></pre></div>
-<p>Ignore for the moment <em>the man behind the curtain</em>, i.e the <code class="sourceCode ocaml">parse_expr</code> argument, since its purpose will be made clear when we will have to parse parenthesized expressions.</p>
-<p>In order to parse an arbitrary primary expression, we need to determine what sort of expression it is. For numeric literals, we have:</p>
-<div class="sourceCode" id="cb14"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; Ast.Number f</span></code></pre></div>
-<p>We match the <code class="sourceCode ocaml">Lexer</code> variant <code class="sourceCode ocaml">Number</code> to the <code class="sourceCode ocaml">Ast.Number</code> which is as easy as it can possibly be.</p>
-<p>For parenthesized expressions we have:</p>
-<div class="sourceCode" id="cb15"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
-<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
-<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    expr</span></code></pre></div>
-<p>When we parse a parenthesized expression we know how to parse <code>(</code> and <code>)</code> but since we have just started writing our parser we cannot parse a whole expression <em>yet</em>. So why we just assume one and hope for the best.</p>
-<p>Let’s continue with identifiers, or more precisely with “primary” expression which start with identifiers.</p>
-<div class="sourceCode" id="cb16"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>  | Ident v -&gt;</span>
-<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
-<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>        drop ll1;</span>
-<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> args = parse_list parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>        require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
-<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>        Ast.Call (v, <span class="dt">Array</span>.of_list args)</span>
-<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>      | _ -&gt; Ast.Variable v</span>
-<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
-<p>Since nothing else can start “primary” expression we raise a <code class="sourceCode ocaml">Error</code> exception for the rest of the cases.</p>
-<div class="sourceCode" id="cb17"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>  | Def | Extern | Kwd _ <span class="kw">as</span> token -&gt; <span class="dt">raise</span> @@ Error token</span></code></pre></div>
-<p>Now we can now parse “primary” expression but only if we know how to parse “full” expressions. Stuck? No.</p>
-<p>A <code class="sourceCode ocaml">parse_expr</code> function can be defined like this:</p>
-<div class="sourceCode" id="cb18"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_expr ll1 = parse_primary parse_expr ll1</span></code></pre></div>
-<p>You can read it informally as <code class="sourceCode ocaml">parse_expr</code> is basically <code class="sourceCode ocaml">parse_primary</code>. Because, it is.</p>
-<p>At this moment we can use it to parse number, variables, function calls and parenthesized expressions and produces ASTs. Now can be a good moment to load the code into an interactive session and try it, defining a <code class="sourceCode ocaml">parse_string</code> like this:</p>
-<div class="sourceCode" id="cb19"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_string s = parse_expr @@ ll1_from_string s</span></code></pre></div>
-<h2 id="binary-expression-parsing">Binary Expression parsing</h2>
-<p>Binary expressions are significantly harder to parse because they are often ambiguous. For example, when given the string <code>x+y*z</code>, the parser can choose to parse it as either <code>(x+y)*z</code> or <code>x+(y*z)</code>. With common definitions from mathematics, we expect the later parse, because <code>*</code> (multiplication) has higher precedence than <code>+</code> (addition).</p>
-<p>There are many ways to handle this, an elegant and efficient way is to use <a href="http://en.wikipedia.org/wiki/Operator-precedence_parser">Operator-Precedence Parsing</a>. This parsing technique uses the precedence of binary operators to guide recursion and does it all in a big and relatively tricky recursive function.</p>
-<p>But to make make things simpler we will stick with recursive decent parsers where functions which parse expressions with lower precedence (addition) will call functions which parse expressions with higher precedence (multiplication) on the (yet) un-parsed input.<a href="#fn1" class="footnote-ref" id="fnref1" role="doc-noteref"><sup>1</sup></a></p>
-<blockquote>
-<p>And there was much rejoicing, since <code>a + b * c</code> was parsed as <code>a + (b * c)</code></p>
-</blockquote>
-<p>For the basic form of Kaleidoscope, we will only support 4 binary operators and 3 levels of precedence (this can obviously be extended by you, our brave and intrepid reader).</p>
-<div class="sourceCode" id="cb20"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="co">(** Operator precedences *)</span></span>
-<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> precedence =</span>
-<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>  | Low</span>
-<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>  | Medium</span>
-<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>  | High</span></code></pre></div>
-<p>And we need a somewhere to specify the actual preferences. Having a <code class="sourceCode ocaml"><span class="dt">Hashtbl</span>.t</code> makes it easy to add new operators and makes it clear that the algorithm doesn’t depend on the specific operators involved.<a href="#fn2" class="footnote-ref" id="fnref2" role="doc-noteref"><sup>2</sup></a></p>
-<div class="sourceCode" id="cb21"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> precedences: (precedence, <span class="dt">char</span> <span class="dt">list</span>) <span class="dt">Hashtbl</span>.t =</span>
-<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> hashtable =  <span class="dt">Hashtbl</span>.create <span class="dv">10</span> <span class="kw">in</span></span>
-<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Low    [ <span class="ch">&#39;&lt;&#39;</span> ];</span>
-<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Medium [ <span class="ch">&#39;+&#39;</span>; <span class="ch">&#39;-&#39;</span> ];</span>
-<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable High   [ <span class="ch">&#39;*&#39;</span> ];</span>
-<span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a>  hashtable</span></code></pre></div>
-<p><strong>Exersizes for the reader:</strong></p>
-<ul>
-<li>
-Write an <code class="sourceCode ocaml">add_user_operator</code> function. It should accept a precedence level and a char as operator.
-</li>
-<li>
-Add an <code class="sourceCode ocaml">User</code> precedence level after the <code class="sourceCode ocaml">High</code> one, and change the parsing functions below to accommodate for it.
-</li>
-</ul>
-<p>Since all 3 function for parsing “binary” expressions follow the same pattern we will write a generic <code class="sourceCode ocaml">parse_binary</code> function and will obtain our <em>concrete</em> functions from it.</p>
-<p>One minor problem is that the <code class="sourceCode ocaml">parse_binary</code> function with the highest precedence need to call the <code class="sourceCode ocaml">parse_primary</code> function which needs the extra <code class="sourceCode ocaml">parse_expr</code> argument. So we need to pass it to all <code class="sourceCode ocaml">parse_binary</code> functions.</p>
-<div class="sourceCode" id="cb22"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_binary precedence parse_prev parse_expr ll1 =</span>
-<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> chars = <span class="dt">Hashtbl</span>.find precedences precedence <span class="kw">in</span></span>
-<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> loop lhs ll1 =</span>
-<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a>    | Kwd c <span class="kw">when</span> <span class="dt">List</span>.mem c chars -&gt;</span>
-<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a>      drop ll1;</span>
-<span id="cb22-7"><a href="#cb22-7" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> rhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb22-8"><a href="#cb22-8" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> lhs = Ast.Binary (c, lhs, rhs) <span class="kw">in</span></span>
-<span id="cb22-9"><a href="#cb22-9" aria-hidden="true" tabindex="-1"></a>      loop lhs ll1</span>
-<span id="cb22-10"><a href="#cb22-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb22-11"><a href="#cb22-11" aria-hidden="true" tabindex="-1"></a>    | _ -&gt; lhs</span>
-<span id="cb22-12"><a href="#cb22-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb22-13"><a href="#cb22-13" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* handle the end of input *)</span></span>
-<span id="cb22-14"><a href="#cb22-14" aria-hidden="true" tabindex="-1"></a>    | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; lhs</span>
-<span id="cb22-15"><a href="#cb22-15" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
-<span id="cb22-16"><a href="#cb22-16" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> lhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb22-17"><a href="#cb22-17" aria-hidden="true" tabindex="-1"></a>  loop lhs ll1</span></code></pre></div>
-<p>This is how it all works: <code class="sourceCode ocaml">parse_binary</code> tries to get the <code class="sourceCode ocaml">lhs</code> using <code class="sourceCode ocaml">parse_prev</code> (which can call it’s own <code class="sourceCode ocaml">parse_prev</code>) then it checks the next token. If it is the right token then it calls <code class="sourceCode ocaml">parse_prev</code> to get the <code class="sourceCode ocaml">rhs</code>. On success it combines <code class="sourceCode ocaml">lhs</code>, <code class="sourceCode ocaml">rhs</code> and <code>c</code> into a new expression which becomes the new <code class="sourceCode ocaml">lhs</code> and so on.</p>
-<p>If the end of input was reached or the token is the <em>wrong one</em> it just returns <code class="sourceCode ocaml">lhs</code></p>
-<p>Let’s write our concrete binary parsing functions</p>
-<div class="sourceCode" id="cb23"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_high_precedence parse_expr ll1 =</span>
-<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a>  parse_binary High parse_primary parse_expr ll1</span>
-<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_medium_precedence parse_expr ll1 =</span>
-<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>  parse_binary Medium parse_high_precedence parse_expr ll1</span>
-<span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb23-7"><a href="#cb23-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_low_precedence parse_expr ll1 =</span>
-<span id="cb23-8"><a href="#cb23-8" aria-hidden="true" tabindex="-1"></a>  parse_binary Low parse_medium_precedence parse_expr ll1</span></code></pre></div>
-<p>What we have here is a sequence of parsing functions which accept a larger and larger grammar and the last one which accepts it fully. Let’s spell it out in full.</p>
-<ul>
-<li>
-<code class="sourceCode ocaml">parse_high_precedence</code> - accepts all primary expressions and multiplication
-</li>
-<li>
-<code class="sourceCode ocaml">parse_medium_precedence</code> - accepts all primary expressions, multiplication, and also addition and substraction.
-</li>
-<li>
-<code class="sourceCode ocaml">parse_low_precedence</code> - accepts all of the above and comparisons.
-</li>
-</ul>
-<p>Looks like we are done. Well, not exactly. We still need to define <code class="sourceCode ocaml">parse_expr</code>. Which is just:</p>
-<div class="sourceCode" id="cb24"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_expr ll1 = parse_low_precedence parse_expr ll1</span></code></pre></div>
-<p>And that’s it. We now have a parser for expressions.</p>
-<h2 id="parsing-the-rest">Parsing the rest</h2>
-<p>The next thing missing is handling of function prototypes. In Kaleidoscope, these are used both for ‘extern’ function declarations as well as function body definitions. The code to do this is straight-forward and not very interesting (once you’ve survived expressions):</p>
-<div class="sourceCode" id="cb25"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* prototype</span></span>
-<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a><span class="co"> *   ::= id &#39;(&#39; id* &#39;)&#39; *)</span></span>
-<span id="cb25-3"><a href="#cb25-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_prototype ll1 =</span>
-<span id="cb25-4"><a href="#cb25-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> parse_params params ll1 =</span>
-<span id="cb25-5"><a href="#cb25-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
-<span id="cb25-6"><a href="#cb25-6" aria-hidden="true" tabindex="-1"></a>    | Kwd <span class="ch">&#39;)&#39;</span> -&gt; <span class="dt">List</span>.rev params</span>
-<span id="cb25-7"><a href="#cb25-7" aria-hidden="true" tabindex="-1"></a>    | Ident p -&gt; parse_params (p :: params) ll1</span>
-<span id="cb25-8"><a href="#cb25-8" aria-hidden="true" tabindex="-1"></a>    | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;) or name expected&quot;</span>, token)</span>
-<span id="cb25-9"><a href="#cb25-9" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
-<span id="cb25-10"><a href="#cb25-10" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
-<span id="cb25-11"><a href="#cb25-11" aria-hidden="true" tabindex="-1"></a>  | Ident name -&gt;</span>
-<span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;(&#39;</span>) ll1;</span>
-<span id="cb25-13"><a href="#cb25-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> params = parse_params [] ll1 <span class="kw">in</span></span>
-<span id="cb25-14"><a href="#cb25-14" aria-hidden="true" tabindex="-1"></a>    Ast.Prototype(name, <span class="dt">Array</span>.of_list params)</span>
-<span id="cb25-15"><a href="#cb25-15" aria-hidden="true" tabindex="-1"></a>  | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;name expected&quot;</span>, token)</span></code></pre></div>
-<p>Given this, a function definition is very simple, just a prototype plus an expression to implement the body:</p>
-<div class="sourceCode" id="cb26"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_def ll1 =</span>
-<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a>  require Def ll1;</span>
-<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = parse_prototype ll1 <span class="kw">in</span></span>
-<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span></code></pre></div>
-<p>In addition, we support ‘extern’ to declare functions like ‘sin’ and ‘cos’ as well as to support forward declaration of user functions. These ’extern’s are just prototypes with no body:</p>
-<div class="sourceCode" id="cb27"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_extern ll1 =</span>
-<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>  require Extern ll1;</span>
-<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>  parse_prototype ll1</span></code></pre></div>
-<p>Finally, we’ll also let the user type in arbitrary top-level expressions and evaluate them on the fly. We will handle this by defining anonymous nullary (zero argument) functions for them:</p>
-<div class="sourceCode" id="cb28"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_toplevel ll1 =</span>
-<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = Ast.Prototype(<span class="st">&quot;&quot;</span>, [||]) <span class="kw">in</span></span>
-<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span></code></pre></div>
-<p>Now that we have all the pieces, let’s build a little driver that will let us actually execute this code we’ve built!</p>
-<h2 id="the-driver">The Driver</h2>
-<p>The driver for this simply invokes all of the parsing pieces with a top-level dispatch loop. There isn’t much interesting here, so I’ll just include the top-level loop.</p>
-<div class="sourceCode" id="cb29"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* top ::= definition | external | expression | &#39;;&#39; *)</span></span>
-<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> main_loop ll1 =</span>
-<span id="cb29-3"><a href="#cb29-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> Parser.peek ll1 <span class="kw">with</span></span>
-<span id="cb29-4"><a href="#cb29-4" aria-hidden="true" tabindex="-1"></a>  | Lexer.Kwd <span class="ch">&#39;;&#39;</span> -&gt; Parser.drop ll1; main_loop ll1</span>
-<span id="cb29-5"><a href="#cb29-5" aria-hidden="true" tabindex="-1"></a>  | token -&gt;</span>
-<span id="cb29-6"><a href="#cb29-6" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">try</span> <span class="kw">match</span> token <span class="kw">with</span></span>
-<span id="cb29-7"><a href="#cb29-7" aria-hidden="true" tabindex="-1"></a>        | Lexer.Def -&gt;</span>
-<span id="cb29-8"><a href="#cb29-8" aria-hidden="true" tabindex="-1"></a>          Parser.parse_def ll1;</span>
-<span id="cb29-9"><a href="#cb29-9" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed a function definition.</span><span class="ch">\n</span><span class="st">%!&quot;</span></span>
-<span id="cb29-10"><a href="#cb29-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb29-11"><a href="#cb29-11" aria-hidden="true" tabindex="-1"></a>        | Lexer.Extern -&gt;</span>
-<span id="cb29-12"><a href="#cb29-12" aria-hidden="true" tabindex="-1"></a>          Parser.parse_extern ll1;</span>
-<span id="cb29-13"><a href="#cb29-13" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed an extern.</span><span class="ch">\n</span><span class="st">%!&quot;</span></span>
-<span id="cb29-14"><a href="#cb29-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb29-15"><a href="#cb29-15" aria-hidden="true" tabindex="-1"></a>        | _ -&gt;</span>
-<span id="cb29-16"><a href="#cb29-16" aria-hidden="true" tabindex="-1"></a>          Parser.parse_toplevel ll1;</span>
-<span id="cb29-17"><a href="#cb29-17" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;parsed a top-level expr</span><span class="ch">\n</span><span class="st">%!&quot;</span></span>
-<span id="cb29-18"><a href="#cb29-18" aria-hidden="true" tabindex="-1"></a>      <span class="kw">with</span></span>
-<span id="cb29-19"><a href="#cb29-19" aria-hidden="true" tabindex="-1"></a>      | Parser.Error _</span>
-<span id="cb29-20"><a href="#cb29-20" aria-hidden="true" tabindex="-1"></a>      | Parser.<span class="dt">Failure</span> _ <span class="kw">as</span> <span class="dt">exn</span> -&gt;</span>
-<span id="cb29-21"><a href="#cb29-21" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> error = <span class="dt">Printexc</span>.to_string <span class="dt">exn</span> <span class="kw">in</span></span>
-<span id="cb29-22"><a href="#cb29-22" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Format</span>.printf <span class="st">&quot;Error: %s</span><span class="ch">\n</span><span class="st">%!&quot;</span> error</span>
-<span id="cb29-23"><a href="#cb29-23" aria-hidden="true" tabindex="-1"></a>    );</span>
-<span id="cb29-24"><a href="#cb29-24" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
-<span id="cb29-25"><a href="#cb29-25" aria-hidden="true" tabindex="-1"></a>    main_loop ll1</span>
-<span id="cb29-26"><a href="#cb29-26" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb29-27"><a href="#cb29-27" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Clean exit on end of Lexer input *)</span></span>
-<span id="cb29-28"><a href="#cb29-28" aria-hidden="true" tabindex="-1"></a>  | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; ()</span></code></pre></div>
-<p>The most interesting part of this is that we ignore top-level semicolons. Why is this, you ask? The basic reason is that if you type “4 + 5” at the command line, the parser doesn’t know whether that is the end of what you will type or not. For example, on the next line you could type “def foo…” in which case 4+5 is the end of a top-level expression. Alternatively you could type “* 6”, which would continue the expression. Having top-level semicolons allows you to type “4+5;”, and the parser will know you are done.</p>
-<p>We should also end the top loop on end of input (Ctrl D).</p>
-<p>As for the <code>main</code> function it is even less interesting</p>
-<div class="sourceCode" id="cb30"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> main () =</span>
-<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ll1 = Parser.ll1_from_channel <span class="dt">stdin</span> <span class="kw">in</span></span>
-<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
-<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a>  main_loop ll1</span></code></pre></div>
-<h2 id="conclusions">Conclusions</h2>
-<p>With less than 300 lines of (somewhat) commented code</p>
-<pre><code>$ wc -l ast.ml lexer.mll parser.ml toy.ml
-  25 ast.ml
-  34 lexer.mll
- 166 parser.ml
-  38 toy.ml
- 263 total</code></pre>
-<p>we fully defined our minimal language, including a lexer, parser, and AST builder. With this done, the executable will validate Kaleidoscope code and tell us if it is grammatically invalid. For example, here is a sample interaction:</p>
-<pre class="out"><code>$ ./toy
-ready&gt; def foo(x y) x+foo(y, 4.0);
-Parsed a function definition.
-ready&gt; def foo(x y) x+y y;
-Parsed a function definition.
-ready&gt; parsed a top-level expr
-ready&gt; def foo(x y) x+y );
-Parsed a function definition.
-ready&gt; Error: Unexpected token: )
-ready&gt; extern sin(a);
-Parsed an extern.
-ready&gt; ^D
-$</code></pre>
-<p>There is a lot of room for extension here. You can define new AST nodes, extend the language in many ways, etc. In the <a href="https://vrotaru.github.io/llvm-kaleidoscope/chapter03.html">next installment</a>, we will describe how to generate LLVM Intermediate Representation (IR) from the AST.</p>
-<h2 id="full-code-listing">Full code listing</h2>
-<p>Here is the complete code listing for this and the previous chapter. Note that it is fully self-contained: you don’t need LLVM or any external libraries at all for this. (Besides the ocaml standard libraries, of course.) To build this, just compile with:</p>
-<pre><code># generate the lexer
-$ ocamllex lexer.mll
-# compile everything
-$ ocamlc lexer.ml ast.ml parser.ml toy.ml -o toy
-# run
-$ ./toy</code></pre>
-<p>Here is the code:</p>
-<p><code>lexer.mll</code>:</p>
-<div class="sourceCode" id="cb34"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a>{</span>
-<span id="cb34-2"><a href="#cb34-2" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> t =</span>
-<span id="cb34-3"><a href="#cb34-3" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Commands *)</span></span>
-<span id="cb34-4"><a href="#cb34-4" aria-hidden="true" tabindex="-1"></a>  | Def | Extern</span>
-<span id="cb34-5"><a href="#cb34-5" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Primitives *)</span></span>
-<span id="cb34-6"><a href="#cb34-6" aria-hidden="true" tabindex="-1"></a>  | Ident <span class="kw">of</span> <span class="dt">string</span> | Number <span class="kw">of</span> <span class="dt">float</span></span>
-<span id="cb34-7"><a href="#cb34-7" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Unknown *)</span></span>
-<span id="cb34-8"><a href="#cb34-8" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="kw">of</span> <span class="dt">char</span></span>
-<span id="cb34-9"><a href="#cb34-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb34-10"><a href="#cb34-10" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> pp ppf = <span class="kw">function</span></span>
-<span id="cb34-11"><a href="#cb34-11" aria-hidden="true" tabindex="-1"></a>  | Def      -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;def&quot;</span></span>
-<span id="cb34-12"><a href="#cb34-12" aria-hidden="true" tabindex="-1"></a>  | Extern   -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;extern&quot;</span></span>
-<span id="cb34-13"><a href="#cb34-13" aria-hidden="true" tabindex="-1"></a>  | Ident s  -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%s&quot;</span> s</span>
-<span id="cb34-14"><a href="#cb34-14" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%f&quot;</span> f</span>
-<span id="cb34-15"><a href="#cb34-15" aria-hidden="true" tabindex="-1"></a>  | Kwd c    -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%c&quot;</span> c</span>
-<span id="cb34-16"><a href="#cb34-16" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb34-17"><a href="#cb34-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb34-18"><a href="#cb34-18" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> alpha = [<span class="ch">&#39;a&#39;</span>-<span class="ch">&#39;z&#39;</span> <span class="ch">&#39;A&#39;</span>-<span class="ch">&#39;Z&#39;</span>]</span>
-<span id="cb34-19"><a href="#cb34-19" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> digit = [<span class="ch">&#39;0&#39;</span>-<span class="ch">&#39;9&#39;</span>]</span>
-<span id="cb34-20"><a href="#cb34-20" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb34-21"><a href="#cb34-21" aria-hidden="true" tabindex="-1"></a>rule token = parse</span>
-<span id="cb34-22"><a href="#cb34-22" aria-hidden="true" tabindex="-1"></a>  | [<span class="ch">&#39; &#39;</span> <span class="ch">&#39;\t&#39;</span> <span class="ch">&#39;\r&#39;</span> <span class="ch">&#39;\n&#39;</span>]       { token lexbuf }</span>
-<span id="cb34-23"><a href="#cb34-23" aria-hidden="true" tabindex="-1"></a>  | <span class="st">&quot;def&quot;</span>                      { Def }</span>
-<span id="cb34-24"><a href="#cb34-24" aria-hidden="true" tabindex="-1"></a>  | <span class="st">&quot;extern&quot;</span>                   { Extern }</span>
-<span id="cb34-25"><a href="#cb34-25" aria-hidden="true" tabindex="-1"></a>  | alpha+ <span class="kw">as</span> s                { Ident s }</span>
-<span id="cb34-26"><a href="#cb34-26" aria-hidden="true" tabindex="-1"></a>  | digit+ (<span class="ch">&#39;.&#39;</span> digit<span class="er">*)</span>? <span class="kw">as</span> f  { Number (<span class="dt">float_of_string</span> f) }</span>
-<span id="cb34-27"><a href="#cb34-27" aria-hidden="true" tabindex="-1"></a>  | <span class="ch">&#39;#&#39;</span>                        { comment lexbuf }</span>
-<span id="cb34-28"><a href="#cb34-28" aria-hidden="true" tabindex="-1"></a>  | _ <span class="kw">as</span> c                     { Kwd c }</span>
-<span id="cb34-29"><a href="#cb34-29" aria-hidden="true" tabindex="-1"></a>  | eof                        { <span class="dt">raise</span> <span class="dt">End_of_file</span> }</span>
-<span id="cb34-30"><a href="#cb34-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb34-31"><a href="#cb34-31" aria-hidden="true" tabindex="-1"></a><span class="kw">and</span> comment = parse</span>
-<span id="cb34-32"><a href="#cb34-32" aria-hidden="true" tabindex="-1"></a>  | <span class="ch">&#39;\n&#39;</span>                       { token lexbuf }</span>
-<span id="cb34-33"><a href="#cb34-33" aria-hidden="true" tabindex="-1"></a>  | _                          { comment lexbuf }</span>
-<span id="cb34-34"><a href="#cb34-34" aria-hidden="true" tabindex="-1"></a>  | eof                        { <span class="dt">raise</span> <span class="dt">End_of_file</span> }</span></code></pre></div>
-<p><code>ast.ml</code>:</p>
-<div class="sourceCode" id="cb35"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a><span class="co">(*===----------------------------------------------------------------------===</span></span>
-<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a><span class="co"> * Abstract Syntax Tree (aka Parse Tree)</span></span>
-<span id="cb35-3"><a href="#cb35-3" aria-hidden="true" tabindex="-1"></a><span class="co"> *===----------------------------------------------------------------------===*)</span></span>
-<span id="cb35-4"><a href="#cb35-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-5"><a href="#cb35-5" aria-hidden="true" tabindex="-1"></a><span class="co">(* expr - Base type for all expression nodes. *)</span></span>
-<span id="cb35-6"><a href="#cb35-6" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> expr =</span>
-<span id="cb35-7"><a href="#cb35-7" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for numeric literals like &quot;1.0&quot;. *)</span></span>
-<span id="cb35-8"><a href="#cb35-8" aria-hidden="true" tabindex="-1"></a>  | Number <span class="kw">of</span> <span class="dt">float</span></span>
-<span id="cb35-9"><a href="#cb35-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-10"><a href="#cb35-10" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for referencing a variable, like &quot;a&quot;. *)</span></span>
-<span id="cb35-11"><a href="#cb35-11" aria-hidden="true" tabindex="-1"></a>  | Variable <span class="kw">of</span> <span class="dt">string</span></span>
-<span id="cb35-12"><a href="#cb35-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-13"><a href="#cb35-13" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for a binary operator. *)</span></span>
-<span id="cb35-14"><a href="#cb35-14" aria-hidden="true" tabindex="-1"></a>  | Binary <span class="kw">of</span> <span class="dt">char</span> * expr * expr</span>
-<span id="cb35-15"><a href="#cb35-15" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-16"><a href="#cb35-16" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for function calls. *)</span></span>
-<span id="cb35-17"><a href="#cb35-17" aria-hidden="true" tabindex="-1"></a>  | Call <span class="kw">of</span> <span class="dt">string</span> * expr <span class="dt">array</span></span>
-<span id="cb35-18"><a href="#cb35-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-19"><a href="#cb35-19" aria-hidden="true" tabindex="-1"></a><span class="co">(* proto - This type represents the &quot;prototype&quot; for a function, which captures</span></span>
-<span id="cb35-20"><a href="#cb35-20" aria-hidden="true" tabindex="-1"></a><span class="co"> * its name, and its argument names (thus implicitly the number of arguments the</span></span>
-<span id="cb35-21"><a href="#cb35-21" aria-hidden="true" tabindex="-1"></a><span class="co"> * function takes). *)</span></span>
-<span id="cb35-22"><a href="#cb35-22" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> proto = Prototype <span class="kw">of</span> <span class="dt">string</span> * <span class="dt">string</span> <span class="dt">array</span></span>
-<span id="cb35-23"><a href="#cb35-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb35-24"><a href="#cb35-24" aria-hidden="true" tabindex="-1"></a><span class="co">(* func - This type represents a function definition itself. *)</span></span>
-<span id="cb35-25"><a href="#cb35-25" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> func = Function <span class="kw">of</span> proto * expr</span></code></pre></div>
-<p><code>parser.ml</code>:</p>
-<div class="sourceCode" id="cb36"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> token = Lexer.t =</span>
-<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Commands *)</span></span>
-<span id="cb36-3"><a href="#cb36-3" aria-hidden="true" tabindex="-1"></a>  | Def | Extern</span>
-<span id="cb36-4"><a href="#cb36-4" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Primitives *)</span></span>
-<span id="cb36-5"><a href="#cb36-5" aria-hidden="true" tabindex="-1"></a>  | Ident <span class="kw">of</span> <span class="dt">string</span> | Number <span class="kw">of</span> <span class="dt">float</span></span>
-<span id="cb36-6"><a href="#cb36-6" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Unknown *)</span></span>
-<span id="cb36-7"><a href="#cb36-7" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="kw">of</span> <span class="dt">char</span></span>
-<span id="cb36-8"><a href="#cb36-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-9"><a href="#cb36-9" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> token_pp = Lexer.pp</span>
-<span id="cb36-10"><a href="#cb36-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-11"><a href="#cb36-11" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> Error <span class="kw">of</span> token</span>
-<span id="cb36-12"><a href="#cb36-12" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> <span class="dt">Failure</span> <span class="kw">of</span> <span class="dt">string</span> * token</span>
-<span id="cb36-13"><a href="#cb36-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-14"><a href="#cb36-14" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-8&quot;</span>]</span>
-<span id="cb36-15"><a href="#cb36-15" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
-<span id="cb36-16"><a href="#cb36-16" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> Error t</span>
-<span id="cb36-17"><a href="#cb36-17" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;Unexpected token: %a&quot;</span> token_pp t))</span>
-<span id="cb36-18"><a href="#cb36-18" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
-<span id="cb36-19"><a href="#cb36-19" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> <span class="dt">Failure</span> (message, token)</span>
-<span id="cb36-20"><a href="#cb36-20" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;%s: %a&quot;</span> message token_pp token))</span>
-<span id="cb36-21"><a href="#cb36-21" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;+8&quot;</span>]</span>
-<span id="cb36-22"><a href="#cb36-22" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-23"><a href="#cb36-23" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> ll1 = <span class="co">(* Hint: See LL1 grammars *)</span></span>
-<span id="cb36-24"><a href="#cb36-24" aria-hidden="true" tabindex="-1"></a>  { <span class="kw">mutable</span> lookahead : token <span class="dt">option</span>;</span>
-<span id="cb36-25"><a href="#cb36-25" aria-hidden="true" tabindex="-1"></a>    lexbuf            : <span class="dt">Lexing</span>.lexbuf;</span>
-<span id="cb36-26"><a href="#cb36-26" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb36-27"><a href="#cb36-27" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1 lexbuf = { lookahead = <span class="dt">None</span>; lexbuf }</span>
-<span id="cb36-28"><a href="#cb36-28" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-29"><a href="#cb36-29" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_string str = ll1 @@ <span class="dt">Lexing</span>.from_string str</span>
-<span id="cb36-30"><a href="#cb36-30" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_channel ch = ll1 @@ <span class="dt">Lexing</span>.from_channel ch</span>
-<span id="cb36-31"><a href="#cb36-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-32"><a href="#cb36-32" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> next ll1 =</span>
-<span id="cb36-33"><a href="#cb36-33" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
-<span id="cb36-34"><a href="#cb36-34" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
-<span id="cb36-35"><a href="#cb36-35" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; ll1.lookahead &lt;- <span class="dt">None</span>; token</span>
-<span id="cb36-36"><a href="#cb36-36" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; Lexer.token lexbuf</span>
-<span id="cb36-37"><a href="#cb36-37" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-38"><a href="#cb36-38" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> peek ll1 =</span>
-<span id="cb36-39"><a href="#cb36-39" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
-<span id="cb36-40"><a href="#cb36-40" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
-<span id="cb36-41"><a href="#cb36-41" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; token</span>
-<span id="cb36-42"><a href="#cb36-42" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; <span class="kw">let</span> token = Lexer.token lexbuf <span class="kw">in</span></span>
-<span id="cb36-43"><a href="#cb36-43" aria-hidden="true" tabindex="-1"></a>    ll1.lookahead &lt;- <span class="dt">Some</span> token;</span>
-<span id="cb36-44"><a href="#cb36-44" aria-hidden="true" tabindex="-1"></a>    token</span>
-<span id="cb36-45"><a href="#cb36-45" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-46"><a href="#cb36-46" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> drop ll1 = <span class="dt">ignore</span> @@ next ll1</span>
-<span id="cb36-47"><a href="#cb36-47" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-48"><a href="#cb36-48" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> require ?msg token ll1 =</span>
-<span id="cb36-49"><a href="#cb36-49" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> token&#39; = next ll1 <span class="kw">in</span></span>
-<span id="cb36-50"><a href="#cb36-50" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> token &lt;&gt; token&#39; <span class="kw">then</span></span>
-<span id="cb36-51"><a href="#cb36-51" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> message =  <span class="kw">match</span> msg <span class="kw">with</span></span>
-<span id="cb36-52"><a href="#cb36-52" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> message -&gt; message</span>
-<span id="cb36-53"><a href="#cb36-53" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span> -&gt; <span class="dt">Format</span>.asprintf <span class="st">&quot;%a expected&quot;</span> token_pp token <span class="kw">in</span></span>
-<span id="cb36-54"><a href="#cb36-54" aria-hidden="true" tabindex="-1"></a>    <span class="dt">raise</span> @@ <span class="dt">Failure</span> (message, token&#39;)</span>
-<span id="cb36-55"><a href="#cb36-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-56"><a href="#cb36-56" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-4&quot;</span>]</span>
-<span id="cb36-57"><a href="#cb36-57" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_list <span class="kw">parser</span> ll1 =</span>
-<span id="cb36-58"><a href="#cb36-58" aria-hidden="true" tabindex="-1"></a>  <span class="kw">try</span></span>
-<span id="cb36-59"><a href="#cb36-59" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> e = <span class="kw">parser</span> ll1 <span class="kw">in</span></span>
-<span id="cb36-60"><a href="#cb36-60" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb36-61"><a href="#cb36-61" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;,&#39;</span> -&gt; drop ll1; e :: parse_list <span class="kw">parser</span> ll1</span>
-<span id="cb36-62"><a href="#cb36-62" aria-hidden="true" tabindex="-1"></a>      | _  -&gt; [e]</span>
-<span id="cb36-63"><a href="#cb36-63" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb36-64"><a href="#cb36-64" aria-hidden="true" tabindex="-1"></a>  <span class="kw">with</span> Error _ -&gt; []</span>
-<span id="cb36-65"><a href="#cb36-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-66"><a href="#cb36-66" aria-hidden="true" tabindex="-1"></a><span class="co">(* primary</span></span>
-<span id="cb36-67"><a href="#cb36-67" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= numberexpr</span></span>
-<span id="cb36-68"><a href="#cb36-68" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= parenexpr</span></span>
-<span id="cb36-69"><a href="#cb36-69" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier</span></span>
-<span id="cb36-70"><a href="#cb36-70" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier(expr list)</span></span>
-<span id="cb36-71"><a href="#cb36-71" aria-hidden="true" tabindex="-1"></a><span class="co">*)</span></span>
-<span id="cb36-72"><a href="#cb36-72" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_primary parse_expr ll1 =</span>
-<span id="cb36-73"><a href="#cb36-73" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
-<span id="cb36-74"><a href="#cb36-74" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; Ast.Number f</span>
-<span id="cb36-75"><a href="#cb36-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-76"><a href="#cb36-76" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
-<span id="cb36-77"><a href="#cb36-77" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-78"><a href="#cb36-78" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
-<span id="cb36-79"><a href="#cb36-79" aria-hidden="true" tabindex="-1"></a>    expr</span>
-<span id="cb36-80"><a href="#cb36-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-81"><a href="#cb36-81" aria-hidden="true" tabindex="-1"></a>  | Ident v -&gt;</span>
-<span id="cb36-82"><a href="#cb36-82" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb36-83"><a href="#cb36-83" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
-<span id="cb36-84"><a href="#cb36-84" aria-hidden="true" tabindex="-1"></a>        drop ll1;</span>
-<span id="cb36-85"><a href="#cb36-85" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> args = parse_list parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-86"><a href="#cb36-86" aria-hidden="true" tabindex="-1"></a>        require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
-<span id="cb36-87"><a href="#cb36-87" aria-hidden="true" tabindex="-1"></a>        Ast.Call (v, <span class="dt">Array</span>.of_list args)</span>
-<span id="cb36-88"><a href="#cb36-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-89"><a href="#cb36-89" aria-hidden="true" tabindex="-1"></a>      | _ -&gt; Ast.Variable v</span>
-<span id="cb36-90"><a href="#cb36-90" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb36-91"><a href="#cb36-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-92"><a href="#cb36-92" aria-hidden="true" tabindex="-1"></a>  | Def | Extern | Kwd _ <span class="kw">as</span> token -&gt; <span class="dt">raise</span> @@ Error token</span>
-<span id="cb36-93"><a href="#cb36-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-94"><a href="#cb36-94" aria-hidden="true" tabindex="-1"></a><span class="co">(** Operator precedences *)</span></span>
-<span id="cb36-95"><a href="#cb36-95" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> precedence =</span>
-<span id="cb36-96"><a href="#cb36-96" aria-hidden="true" tabindex="-1"></a>  | Low</span>
-<span id="cb36-97"><a href="#cb36-97" aria-hidden="true" tabindex="-1"></a>  | Medium</span>
-<span id="cb36-98"><a href="#cb36-98" aria-hidden="true" tabindex="-1"></a>  | High</span>
-<span id="cb36-99"><a href="#cb36-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-100"><a href="#cb36-100" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> precedences: (precedence, <span class="dt">char</span> <span class="dt">list</span>) <span class="dt">Hashtbl</span>.t =</span>
-<span id="cb36-101"><a href="#cb36-101" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> hashtable =  <span class="dt">Hashtbl</span>.create <span class="dv">10</span> <span class="kw">in</span></span>
-<span id="cb36-102"><a href="#cb36-102" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Low    [ <span class="ch">&#39;&lt;&#39;</span> ];</span>
-<span id="cb36-103"><a href="#cb36-103" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Medium [ <span class="ch">&#39;+&#39;</span>; <span class="ch">&#39;-&#39;</span> ];</span>
-<span id="cb36-104"><a href="#cb36-104" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable High   [ <span class="ch">&#39;*&#39;</span> ];</span>
-<span id="cb36-105"><a href="#cb36-105" aria-hidden="true" tabindex="-1"></a>  hashtable</span>
-<span id="cb36-106"><a href="#cb36-106" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-107"><a href="#cb36-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-108"><a href="#cb36-108" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_binary precedence parse_prev parse_expr ll1 =</span>
-<span id="cb36-109"><a href="#cb36-109" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> chars = <span class="dt">Hashtbl</span>.find precedences precedence <span class="kw">in</span></span>
-<span id="cb36-110"><a href="#cb36-110" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> loop lhs ll1 =</span>
-<span id="cb36-111"><a href="#cb36-111" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
-<span id="cb36-112"><a href="#cb36-112" aria-hidden="true" tabindex="-1"></a>    | Kwd c <span class="kw">when</span> <span class="dt">List</span>.mem c chars -&gt;</span>
-<span id="cb36-113"><a href="#cb36-113" aria-hidden="true" tabindex="-1"></a>      drop ll1;</span>
-<span id="cb36-114"><a href="#cb36-114" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> rhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-115"><a href="#cb36-115" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> lhs = Ast.Binary (c, lhs, rhs) <span class="kw">in</span></span>
-<span id="cb36-116"><a href="#cb36-116" aria-hidden="true" tabindex="-1"></a>      loop lhs ll1</span>
-<span id="cb36-117"><a href="#cb36-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-118"><a href="#cb36-118" aria-hidden="true" tabindex="-1"></a>    | _ -&gt; lhs</span>
-<span id="cb36-119"><a href="#cb36-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-120"><a href="#cb36-120" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* handle the end of input *)</span></span>
-<span id="cb36-121"><a href="#cb36-121" aria-hidden="true" tabindex="-1"></a>    | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; lhs</span>
-<span id="cb36-122"><a href="#cb36-122" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
-<span id="cb36-123"><a href="#cb36-123" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> lhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-124"><a href="#cb36-124" aria-hidden="true" tabindex="-1"></a>  loop lhs ll1</span>
-<span id="cb36-125"><a href="#cb36-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-126"><a href="#cb36-126" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_high_precedence parse_expr ll1 =</span>
-<span id="cb36-127"><a href="#cb36-127" aria-hidden="true" tabindex="-1"></a>  parse_binary High parse_primary parse_expr ll1</span>
-<span id="cb36-128"><a href="#cb36-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-129"><a href="#cb36-129" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_medium_precedence parse_expr ll1 =</span>
-<span id="cb36-130"><a href="#cb36-130" aria-hidden="true" tabindex="-1"></a>  parse_binary Medium parse_high_precedence parse_expr ll1</span>
-<span id="cb36-131"><a href="#cb36-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-132"><a href="#cb36-132" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_low_precedence parse_expr ll1 =</span>
-<span id="cb36-133"><a href="#cb36-133" aria-hidden="true" tabindex="-1"></a>  parse_binary Low parse_medium_precedence parse_expr ll1</span>
-<span id="cb36-134"><a href="#cb36-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-135"><a href="#cb36-135" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_expr ll1 = parse_low_precedence parse_expr ll1</span>
-<span id="cb36-136"><a href="#cb36-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-137"><a href="#cb36-137" aria-hidden="true" tabindex="-1"></a><span class="co">(* prototype</span></span>
-<span id="cb36-138"><a href="#cb36-138" aria-hidden="true" tabindex="-1"></a><span class="co"> *   ::= id &#39;(&#39; id* &#39;)&#39; *)</span></span>
-<span id="cb36-139"><a href="#cb36-139" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_prototype ll1 =</span>
-<span id="cb36-140"><a href="#cb36-140" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> parse_params params ll1 =</span>
-<span id="cb36-141"><a href="#cb36-141" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
-<span id="cb36-142"><a href="#cb36-142" aria-hidden="true" tabindex="-1"></a>    | Kwd <span class="ch">&#39;)&#39;</span> -&gt; <span class="dt">List</span>.rev params</span>
-<span id="cb36-143"><a href="#cb36-143" aria-hidden="true" tabindex="-1"></a>    | Ident p -&gt; parse_params (p :: params) ll1</span>
-<span id="cb36-144"><a href="#cb36-144" aria-hidden="true" tabindex="-1"></a>    | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;) or name expected&quot;</span>, token)</span>
-<span id="cb36-145"><a href="#cb36-145" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
-<span id="cb36-146"><a href="#cb36-146" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
-<span id="cb36-147"><a href="#cb36-147" aria-hidden="true" tabindex="-1"></a>  | Ident name -&gt;</span>
-<span id="cb36-148"><a href="#cb36-148" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;(&#39;</span>) ll1;</span>
-<span id="cb36-149"><a href="#cb36-149" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> params = parse_params [] ll1 <span class="kw">in</span></span>
-<span id="cb36-150"><a href="#cb36-150" aria-hidden="true" tabindex="-1"></a>    Ast.Prototype(name, <span class="dt">Array</span>.of_list params)</span>
-<span id="cb36-151"><a href="#cb36-151" aria-hidden="true" tabindex="-1"></a>  | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;name expected&quot;</span>, token)</span>
-<span id="cb36-152"><a href="#cb36-152" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-153"><a href="#cb36-153" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_def ll1 =</span>
-<span id="cb36-154"><a href="#cb36-154" aria-hidden="true" tabindex="-1"></a>  require Def ll1;</span>
-<span id="cb36-155"><a href="#cb36-155" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = parse_prototype ll1 <span class="kw">in</span></span>
-<span id="cb36-156"><a href="#cb36-156" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-157"><a href="#cb36-157" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span>
-<span id="cb36-158"><a href="#cb36-158" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-159"><a href="#cb36-159" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_extern ll1 =</span>
-<span id="cb36-160"><a href="#cb36-160" aria-hidden="true" tabindex="-1"></a>  require Extern ll1;</span>
-<span id="cb36-161"><a href="#cb36-161" aria-hidden="true" tabindex="-1"></a>  parse_prototype ll1</span>
-<span id="cb36-162"><a href="#cb36-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-163"><a href="#cb36-163" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_toplevel ll1 =</span>
-<span id="cb36-164"><a href="#cb36-164" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = Ast.Prototype(<span class="st">&quot;&quot;</span>, [||]) <span class="kw">in</span></span>
-<span id="cb36-165"><a href="#cb36-165" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
-<span id="cb36-166"><a href="#cb36-166" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span></code></pre></div>
-<p><code>toy.ml</code>:</p>
-<div class="sourceCode" id="cb37"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-4-10&quot;</span>]</span>
-<span id="cb37-2"><a href="#cb37-2" aria-hidden="true" tabindex="-1"></a><span class="co">(* top ::= definition | external | expression | &#39;;&#39; *)</span></span>
-<span id="cb37-3"><a href="#cb37-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> main_loop ll1 =</span>
-<span id="cb37-4"><a href="#cb37-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> Parser.peek ll1 <span class="kw">with</span></span>
-<span id="cb37-5"><a href="#cb37-5" aria-hidden="true" tabindex="-1"></a>  | Lexer.Kwd <span class="ch">&#39;;&#39;</span> -&gt; Parser.drop ll1; main_loop ll1</span>
-<span id="cb37-6"><a href="#cb37-6" aria-hidden="true" tabindex="-1"></a>  | token -&gt;</span>
-<span id="cb37-7"><a href="#cb37-7" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">try</span> <span class="kw">match</span> token <span class="kw">with</span></span>
-<span id="cb37-8"><a href="#cb37-8" aria-hidden="true" tabindex="-1"></a>        | Lexer.Def -&gt;</span>
-<span id="cb37-9"><a href="#cb37-9" aria-hidden="true" tabindex="-1"></a>          Parser.parse_def ll1;</span>
-<span id="cb37-10"><a href="#cb37-10" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed a function definition.</span><span class="ch">\n</span><span class="st">&quot;</span></span>
-<span id="cb37-11"><a href="#cb37-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-12"><a href="#cb37-12" aria-hidden="true" tabindex="-1"></a>        | Lexer.Extern -&gt;</span>
-<span id="cb37-13"><a href="#cb37-13" aria-hidden="true" tabindex="-1"></a>          Parser.parse_extern ll1;</span>
-<span id="cb37-14"><a href="#cb37-14" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed an extern.</span><span class="ch">\n</span><span class="st">&quot;</span></span>
-<span id="cb37-15"><a href="#cb37-15" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-16"><a href="#cb37-16" aria-hidden="true" tabindex="-1"></a>        | _ -&gt;</span>
-<span id="cb37-17"><a href="#cb37-17" aria-hidden="true" tabindex="-1"></a>          Parser.parse_toplevel ll1;</span>
-<span id="cb37-18"><a href="#cb37-18" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;parsed a top-level expr</span><span class="ch">\n</span><span class="st">&quot;</span></span>
-<span id="cb37-19"><a href="#cb37-19" aria-hidden="true" tabindex="-1"></a>      <span class="kw">with</span></span>
-<span id="cb37-20"><a href="#cb37-20" aria-hidden="true" tabindex="-1"></a>      | Parser.Error _</span>
-<span id="cb37-21"><a href="#cb37-21" aria-hidden="true" tabindex="-1"></a>      | Parser.<span class="dt">Failure</span> _ <span class="kw">as</span> <span class="dt">exn</span> -&gt;</span>
-<span id="cb37-22"><a href="#cb37-22" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> error = <span class="dt">Printexc</span>.to_string <span class="dt">exn</span> <span class="kw">in</span></span>
-<span id="cb37-23"><a href="#cb37-23" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Format</span>.printf <span class="st">&quot;Error: %s</span><span class="ch">\n</span><span class="st">&quot;</span> error</span>
-<span id="cb37-24"><a href="#cb37-24" aria-hidden="true" tabindex="-1"></a>    );</span>
-<span id="cb37-25"><a href="#cb37-25" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
-<span id="cb37-26"><a href="#cb37-26" aria-hidden="true" tabindex="-1"></a>    main_loop ll1</span>
-<span id="cb37-27"><a href="#cb37-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-28"><a href="#cb37-28" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Clean exit on end of Lexer input *)</span></span>
-<span id="cb37-29"><a href="#cb37-29" aria-hidden="true" tabindex="-1"></a>  | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; ()</span>
-<span id="cb37-30"><a href="#cb37-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-31"><a href="#cb37-31" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> main () =</span>
-<span id="cb37-32"><a href="#cb37-32" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ll1 = Parser.ll1_from_channel <span class="dt">stdin</span> <span class="kw">in</span></span>
-<span id="cb37-33"><a href="#cb37-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-34"><a href="#cb37-34" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
-<span id="cb37-35"><a href="#cb37-35" aria-hidden="true" tabindex="-1"></a>  main_loop ll1</span>
-<span id="cb37-36"><a href="#cb37-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb37-37"><a href="#cb37-37" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> () =</span>
-<span id="cb37-38"><a href="#cb37-38" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> !<span class="dt">Sys</span>.interactive <span class="kw">then</span> () <span class="kw">else</span> main ()</span></code></pre></div>
-<p><a href="https://vrotaru.github.io/llvm-kaleidoscope/chapter03.html">Next: Implementing Code Generation to LLVM IR</a></p>
-<section class="footnotes" role="doc-endnotes">
-<hr />
-<ol>
-<li id="fn1" role="doc-endnote"><p>The Operator-Precedence Parsing is strictly more powerful than what we’ll be doing since you can have arbitrary many levels of preference instead of a fixed number<a href="#fnref1" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
-<li id="fn2" role="doc-endnote"><p>Our algorithm will treat all operator as left-associative, which is not ideal for <code>&lt;</code> and other comparison operators. But it will work for <code>e0 &lt; e1</code> cases.<a href="#fnref2" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
-</ol>
-</section>
+<p>Welcome to Chapter 3 of the <a href="https://vrotaru.github.io/llvm-kaleidoscope/">“Implementing a language with LLVM”</a> tutorial. This chapter shows you how to transform the <a href="https://vrotaru.github.io/llvm-kaleidoscope/chapter02.html">Abstract Syntax Tree</a> built in Chapter 2, into LLVM IR. This will teach you a little bit about how LLVM does things, as well as demonstrate how easy it is to use. It’s much more work to build a lexer and parser than it is to generate LLVM IR code. :)</p>
+<h2 id="code-generation-setup">Code generation setup</h2>
+<p>In order to generate LLVM IR, we want some simple setup to get started. First we define virtual code generation (codegen) methods in each AST class:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> codegen_expr = <span class="kw">function</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>  | Ast.Number f  -&gt; ...</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  | Ast.Variable  -&gt; ...</span></code></pre></div>
+<p>The <code class="sourceCode ocaml">Codegen.codegen_expr</code> function says to emit IR for that AST node along with all the things it depends on, and they all return an LLVM Value object. “Value” is the class used to represent a “<a href="http://en.wikipedia.org/wiki/Static_single_assignment_form">Static Single Assignment (SSA)</a> register” or “SSA value” in LLVM. The most distinct aspect of SSA values is that their value is computed as the related instruction executes, and it does not get a new value until (and if) the instruction re-executes. In other words, there is no way to “change” an SSA value. For more information, please read up on <a href="http://en.wikipedia.org/wiki/Static_single_assignment_form">Static Single Assignment</a> - the concepts are really quite natural once you grok them.</p>
+<p>The second thing we want is an “Error” exception like we used for the parser, which will be used to report errors found during code generation (for example, use of an undeclared parameter):</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">open</span> Llvm</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> Error <span class="kw">of</span> <span class="dt">string</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> error s = <span class="dt">raise</span> @@ Error s</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> context     = global_context ()</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> the_module  = create_module context <span class="st">&quot;my cool jit&quot;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> builder     = builder context</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> double_type = double_type context</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> named_values : (<span class="dt">string</span>, llvalue) <span class="dt">Hashtbl</span>.t = <span class="dt">Hashtbl</span>.create <span class="dv">10</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> find_by_name name = <span class="dt">Hashtbl</span>.find named_values name</span></code></pre></div>
+<p>The global variables will be used during code generation. <code class="sourceCode ocaml">Codegen.the_module</code> is the LLVM construct that contains all of the functions and global variables in a chunk of code. In many ways, it is the top-level structure that the LLVM IR uses to contain code.</p>
+<p>The <code class="sourceCode ocaml">Codegen.builder</code> object is a helper object that makes it easy to generate LLVM instructions. Instances of the <code class="sourceCode ocaml">builder</code> class keep track of the current place to insert instructions and has methods to create new instructions.</p>
+<p>The <code class="sourceCode ocaml">Codegen.named_values</code> map keeps track of which values are defined in the current scope and what their LLVM representation is. (In other words, it is a symbol table for the code). In this form of Kaleidoscope, the only things that can be referenced are function parameters. As such, function parameters will be in this map when generating code for their function body.</p>
+<p>With these basics in place, we can start talking about how to generate code for each expression. Note that this assumes that the <code class="sourceCode ocaml">Codegen.builder</code> has been set up to generate code into something. For now, we’ll assume that this has already been done, and we’ll just use it to emit code.</p>
+<h2 id="expression-code-generation">Expression code generation</h2>
+<p>Generating LLVM code for expression nodes is very straightforward: less than 30 lines of commented code for all four of our expression nodes. First we’ll do numeric literals:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>  | Ast.Number n -&gt; const_float double_type n</span></code></pre></div>
+<p>n the LLVM IR, numeric constants are represented with the ConstantFP class, which holds the numeric value in an APFloat internally (APFloat has the capability of holding floating point constants of Arbitrary Precision). This code basically just creates and returns a ConstantFP. Note that in the LLVM IR that constants are all uniqued together and shared. For this reason, the API uses “the foo::get(..)” idiom instead of “new foo(..)” or “foo::Create(..)”.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>  | Ast.Variable name -&gt;</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">try</span> find_by_name name <span class="kw">with</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>      |  <span class="dt">Not_found</span> -&gt; error <span class="st">&quot;unknowndoub variable name&quot;</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<p>References to variables are also quite simple using LLVM. In the simple version of Kaleidoscope, we assume that the variable has already been emitted somewhere and its value is available. In practice, the only values that can be in the <code class="sourceCode ocaml">Codegen.named_values</code> map are function arguments. This code simply checks to see that the specified name is in the map (if not, an unknown variable is being referenced) and returns the value for it. In future chapters, we’ll add support for <a href="#">loop induction variables</a> in the symbol table, and for <a href="#">local variables</a>.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>  | Ast.Binary (op, lhs, rhs) -&gt;</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> lhs_val = codegen_expr lhs <span class="kw">in</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> rhs_val = codegen_expr rhs <span class="kw">in</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> op <span class="kw">with</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;+&#39;</span> -&gt; build_fadd lhs_val rhs_val <span class="st">&quot;addtmp&quot;</span> builder</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;-&#39;</span> -&gt; build_fsub lhs_val rhs_val <span class="st">&quot;subtmp&quot;</span> builder</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;*&#39;</span> -&gt; build_fmul lhs_val rhs_val <span class="st">&quot;multmp&quot;</span> builder</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;&lt;&#39;</span> -&gt;</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* Conver bool 0/1 to double 0.0 or 1.0 *)</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> i = build_fcmp Fcmp.Ult lhs_val rhs_val <span class="st">&quot;cmptmp&quot;</span> builder <span class="kw">in</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>        build_uitofp i double_type <span class="st">&quot;booltmp&quot;</span> builder</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>      | _ -&gt; error <span class="st">&quot;invalid binary operator&quot;</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<p>Binary operators start to get more interesting. The basic idea here is that we recursively emit code for the left-hand side of the expression, then the right-hand side, then we compute the result of the binary expression. In this code, we do a simple switch on the opcode to create the right LLVM instruction.</p>
+<p>In the example above, the LLVM builder class is starting to show its value. Builder knows where to insert the newly created instruction, all you have to do is specify what instruction to create (e.g. with <code class="sourceCode ocaml">Llvm.builder_fadd</code>), which operands to use (lhs and rhs here) and optionally provide a name for the generated instruction.</p>
+<p>One nice thing about LLVM is that the name is just a hint. For instance, if the code above emits multiple “addtmp” variables, LLVM will automatically provide each one with an increasing, unique numeric suffix. Local value names for instructions are purely optional, but it makes it much easier to read the IR dumps.</p>
+<p><a href="https://llvm.org/docs/LangRef.html#instruction-reference">LLVM instructions</a> are constrained by strict rules: for example, the Left and Right operators of an <a href="https://llvm.org/docs/LangRef.html#add-instruction">add instruction</a> must have the same type, and the result type of the add must match the operand types. Because all values in Kaleidoscope are doubles, this makes for very simple code for add, sub and mul.</p>
+<p>On the other hand, LLVM specifies that the fcmp instruction always returns an ‘i1’ value (a one bit integer). The problem with this is that Kaleidoscope wants the value to be a 0.0 or 1.0 value. In order to get these semantics, we combine the fcmp instruction with a uitofp instruction. This instruction converts its input integer into a floating point value by treating the input as an unsigned value. In contrast, if we used the sitofp instruction, the Kaleidoscope ‘&lt;’ operator would return 0.0 and -1.0, depending on the input value.</p>
+<p>On the other hand, LLVM specifies that the <a href="https://llvm.org/docs/LangRef.html#fcmp-instruction">fcmp instruction</a> always returns an ‘i1’ value (a one bit integer). The problem with this is that Kaleidoscope wants the value to be a 0.0 or 1.0 value. In order to get these semantics, we combine the fcmp instruction with a <a href="https://llvm.org/docs/LangRef.html#uitofp-to-instruction">uitofp instruction</a>. This instruction converts its input integer into a floating point value by treating the input as an unsigned value. In contrast, if we used the <a href="https://llvm.org/docs/LangRef.html#sitofp-to-instruction">sitofp instruction</a>, the Kaleidoscope ‘&lt;’ operator would return 0.0 and -1.0, depending on the input value.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>  | Ast.Call (callee, args) -&gt;</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> callee = <span class="kw">match</span> lookup_function callee the_module <span class="kw">with</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> callee -&gt; callee</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span>        -&gt; error <span class="st">&quot;unknown function referenced&quot;</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">in</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> params = params callee <span class="kw">in</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> <span class="dt">Array</span>.length params = <span class="dt">Array</span>.length args <span class="kw">then</span> ()</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> error <span class="st">&quot;incorrect # of args passed&quot;</span>;</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> args = <span class="dt">Array</span>.map codegen_expr args <span class="kw">in</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    build_call callee args <span class="st">&quot;calltmp&quot;</span> builder</span></code></pre></div>
+<p>Code generation for function calls is quite straightforward with LLVM. The code above initially does a function name lookup in the LLVM Module’s symbol table. Recall that the LLVM Module is the container that holds all of the functions we are JIT’ing. By giving each function the same name as what the user specifies, we can use the LLVM symbol table to resolve function names for us.</p>
+<p>Once we have the function to call, we recursively codegen each argument that is to be passed in, and create an LLVM <a href="https://llvm.org/docs/LangRef.html#call-instruction">call instruction</a>. Note that LLVM uses the native C calling conventions by default, allowing these calls to also call into standard library functions like “sin” and “cos”, with no additional effort.</p>
+<p>This wraps up our handling of the four basic expressions that we have so far in Kaleidoscope. Feel free to go in and add some more. For example, by browsing the <a href="https://llvm.org/docs/LangRef.html">LLVM language reference</a> you’ll find several other interesting instructions that are really easy to plug into our basic framework.</p>
+<h2 id="function-code-generation">Function code generation</h2>
+<p>Code generation for prototypes and functions must handle a number of details, which make their code less beautiful than expression code generation, but allows us to illustrate some important points. First, lets talk about code generation for prototypes: they are used both for function bodies and external function declarations. The code starts with:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> codegen_proto = <span class="kw">function</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  | Ast.Prototype (name, args) -&gt;</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> doubles = <span class="dt">Array</span>.make (<span class="dt">Array</span>.length args) double_type <span class="kw">in</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> ft = function_type double_type doubles <span class="kw">in</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> f = <span class="kw">match</span> lookup_function name the_module <span class="kw">with</span></span></code></pre></div>
+<p>This code packs a lot of power into a few lines. Note first that this function returns a <code class="sourceCode cpp">Function<span class="op">*</span></code> instead of a <code class="sourceCode cpp">Value<span class="op">*</span></code> (although at the moment they both are modeled by <code class="sourceCode ocaml">llvalue</code> in ocaml). Because a “prototype” really talks about the external interface for a function (not the value computed by an expression), it makes sense for it to return the LLVM Function it corresponds to when codegen’d.</p>
+<p>The call to <code class="sourceCode ocaml">Llvm.function_type</code> creates the <code class="sourceCode ocaml">Llvm.llvalue</code> that should be used for a given Prototype. Since all function arguments in Kaleidoscope are of type double, the first line creates a vector of “N” LLVM double types. It then uses the <code class="sourceCode ocaml">Llvm.function_type</code> method to create a function type that takes “N” doubles as arguments, returns one double as a result, and that is not vararg (that uses the function <code class="sourceCode ocaml">Llvm.var_arg_function_type</code>). Note that Types in LLVM are uniqued just like Constant’s are, so you don’t “new” a type, you “get” it.</p>
+<p>The final line above checks if the function has already been defined in <code class="sourceCode ocaml">Codegen.the_module</code>. If not, we will create it.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span> -&gt; declare_function name ft the_module</span></code></pre></div>
+<p>This indicates the type and name to use, as well as which module to insert into. By default we assume a function has <code>Llvm.Linkage.ExternalLinkage</code>. “<a href="https://llvm.org/docs/LangRef.html#linkage-types">external linkage</a>” means that the function may be defined outside the current module and/or that it is callable by functions outside the module. The “name” passed in is the name the user specified: this name is registered in <code class="sourceCode ocaml">Codegen.the_module</code>`s symbol table, which is used by the function call code above.</p>
+<p>In Kaleidoscope, I choose to allow redefinitions of functions in two cases: first, we want to allow ’extern’ing a function more than once, as long as the prototypes for the externs match (since all arguments have the same type, we just have to check that the number of arguments match). Second, we want to allow ’extern’ing a function and then defining a body for it. This is useful when defining mutually recursive functions.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* If &#39;f&#39; conflicted, there was already something named &#39;name&#39;. If it</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="co">         has a body, don&#39;t allow redefinition or reextern. *)</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> f -&gt;</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* If &#39;f&#39; already has a body, reject this. *)</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> <span class="dt">Array</span>.length (basic_blocks f) == <span class="dv">0</span> <span class="kw">then</span> ()</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> error <span class="st">&quot;redefinition of function&quot;</span>;</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* If &#39;f&#39; took a different number of arguments, reject. *)</span></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> <span class="dt">Array</span>.length (params f) == <span class="dt">Array</span>.length args <span class="kw">then</span> ()</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> error <span class="st">&quot;redefinition of function with different # of args&quot;</span>;</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>        f</span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">in</span></span></code></pre></div>
+<p>In order to verify the logic above, we first check to see if the pre-existing function is “empty”. In this case, empty means that it has no basic blocks in it, which means it has no body. If it has no body, it is a forward declaration. Since we don’t allow anything after a full definition of the function, the code rejects this case. If the previous reference to a function was an ‘extern’, we simply verify that the number of arguments for that definition and this one match up. If not, we emit an error.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* set names for all the arguments *)</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Array</span>.iteri</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>      ( <span class="kw">fun</span> i a -&gt;</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>          <span class="kw">let</span> n = args.(i) <span class="kw">in</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>          set_value_name n a;</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Hashtbl</span>.replace named_values n a )</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>      (params f);</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    f</span></code></pre></div>
+<p>The last bit of code for prototypes loops over all of the arguments in the function, setting the name of the LLVM Argument objects to match, and registering the arguments in the <code class="sourceCode ocaml">Codegen.named_values</code> map for future use by the <code class="sourceCode ocaml">Ast.Variable</code> variant. Once this is set up, it returns the Function object to the caller. Note that we don’t check for conflicting argument names here (e.g. “extern foo(a b a)”). Doing so would be very straight-forward with the mechanics we have already used above.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> codegen_func = <span class="kw">function</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  | Ast.Function (proto, body) -&gt;</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Hashtbl</span>.clear named_values;</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> the_function = codegen_proto proto <span class="kw">in</span></span></code></pre></div>
+<p>Code generation for function definitions starts out simply enough: We clear out the <code class="sourceCode ocaml">Codegen.named_values</code> map to make sure that there isn’t anything in it from the last function we compiled. Than we just codegen the prototype (Proto) and verify that it is ok. . Code generation of the prototype ensures that there is an LLVM Function object that is ready to go for us.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* Create a new basic block to start insertion into. *)</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> bb = append_block context <span class="st">&quot;entry&quot;</span> the_function <span class="kw">in</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    position_at_end bb builder;</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">try</span></span></code></pre></div>
+<p>Now we get to the point where the <code class="sourceCode ocaml">Codegen.builder</code> is set up. The first line creates a new <a href="http://en.wikipedia.org/wiki/Basic_block">basic block</a> (named “entry”), which is inserted into the_function. The second line then tells the builder that new instructions should be inserted into the end of the new basic block. Basic blocks in LLVM are an important part of functions that define the <a href="http://en.wikipedia.org/wiki/Control_flow_graph">Control Flow Graph</a>. Since we don’t have any control flow, our functions will only contain one block at this point. We’ll fix this in <a href="#">Chapter 5</a> :).</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> ret_val = codegen_expr body <span class="kw">in</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Finish off the function. *)</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> _ = build_ret ret_val builder <span class="kw">in</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Validate the generated code, checking for consistency. *)</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>      Llvm_analysis.assert_valid_function the_function;</span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>      the_function</span></code></pre></div>
+<p>Once the insertion point is set up, we call the <code class="sourceCode ocaml">Codegen.codegen_expr</code> method for the root expression of the function. If no error happens, this emits code to compute the expression into the entry block and returns the value that was computed. Assuming no error, we then create an LLVM <a href="https://llvm.org/docs/LangRef.html#ret-instruction">ret instruction</a>, which completes the function. Once the function is built, we call <code class="sourceCode ocaml">Llvm_analysis.assert_valid_function</code>, which is provided by LLVM. This function does a variety of consistency checks on the generated code, to determine if our compiler is doing everything right. Using this is important: it can catch a lot of bugs. Once the function is finished and validated, we return it.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>    <span class="kw">with</span> e -&gt;</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>      delete_function the_function;</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>      <span class="dt">raise</span> e</span></code></pre></div>
+<p>The only piece left here is handling of the error case. For simplicity, we handle this by merely deleting the function we produced with the <code class="sourceCode ocaml">Llvm.delete_function</code> method. This allows the user to redefine a function that they incorrectly typed in before: if we didn’t delete it, it would live in the symbol table, with a body, preventing future redefinition.</p>
+<p>This code does have a bug, though. Since the <code class="sourceCode ocaml">Codegen.codegen_proto</code> can return a previously defined forward declaration, our code can actually delete a forward declaration. There are a number of ways to fix this bug, see what you can come up with! Here is a testcase:</p>
+<pre><code>extern foo(a b);     # ok, defines foo.
+def foo(a b) c;      # error, &#39;c&#39; is invalid.
+def bar() foo(1, 2); # error, unknown function &quot;foo&quot;</code></pre>
+<h2 id="driver-changes-and-closing-thoughts">Driver Changes and Closing Thoughts</h2>
+<p>For now, code generation to LLVM doesn’t really get us much, except that we can look at the pretty IR calls. The sample code inserts calls to Codegen into the “Toplevel.main_loop”, and then dumps out the LLVM IR. This gives a nice way to look at the LLVM IR for simple functions. For example:</p>
+<pre><code>ready&gt; 4+5;
+define double @0() {
+entry:
+  ret double 9.000000e+00
+}
+parsed a top-level expr</code></pre>
+<p>Note how the parser turns the top-level expression into anonymous functions for us. This will be handy when we add JIT support in the next chapter. Note also that LLVM has already performed some optimizations for us.</p>
+<pre><code>ready&gt; def foo(a b) a*a + 2*a*b + b*b;
+define double @foo(double %a, double %b) {
+entry:
+  %multmp = fmul double %a, %a
+  %multmp1 = fmul double 2.000000e+00, %a
+  %multmp2 = fmul double %multmp1, %b
+  %addtmp = fadd double %multmp, %multmp2
+  %multmp3 = fmul double %b, %b
+  %addtmp4 = fadd double %addtmp, %multmp3
+  ret double %addtmp4
+}
+Parsed a function definition.</code></pre>
 </body>
 </html>
