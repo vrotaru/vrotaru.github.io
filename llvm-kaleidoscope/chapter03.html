@@ -97,7 +97,7 @@
 </header>
 <p>Welcome to Chapter 3 of the <a href="https://vrotaru.github.io/llvm-kaleidoscope/">“Implementing a language with LLVM”</a> tutorial. This chapter shows you how to transform the <a href="https://vrotaru.github.io/llvm-kaleidoscope/chapter02.html">Abstract Syntax Tree</a> built in Chapter 2, into LLVM IR. This will teach you a little bit about how LLVM does things, as well as demonstrate how easy it is to use. It’s much more work to build a lexer and parser than it is to generate LLVM IR code. :)</p>
 <h2 id="code-generation-setup">Code generation setup</h2>
-<p>In order to generate LLVM IR, we want some simple setup to get started. First we define virtual code generation (codegen) methods in each AST class:</p>
+<p>In order to generate LLVM IR, we want some simple setup to get started. First we define virtual code generation (codegen) methods in each AST variant:</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> codegen_expr = <span class="kw">function</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>  | Ast.Number f  -&gt; ...</span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  | Ast.Variable  -&gt; ...</span></code></pre></div>
@@ -232,7 +232,7 @@ entry:
   ret double 9.000000e+00
 }
 parsed a top-level expr</code></pre>
-<p>Note how the parser turns the top-level expression into anonymous functions for us. This will be handy when we add JIT support in the next chapter. Note also that LLVM has already performed some optimizations for us.</p>
+<p>Note how the parser turns the top-level expression into anonymous functions for us. This will be handy when we add JIT support in the next chapter. A bit surprisingly, LLVM has already performed some optimizations for us.</p>
 <pre><code>ready&gt; def foo(a b) a*a + 2*a*b + b*b;
 define double @foo(double %a, double %b) {
 entry:
@@ -245,5 +245,442 @@ entry:
   ret double %addtmp4
 }
 Parsed a function definition.</code></pre>
+<p>This shows some simple arithmetic. Notice the striking similarity to the LLVM builder calls that we use to create the instructions.</p>
+<pre><code>Parsed a function definition.
+ready&gt; def bar(a) foo(a, 4.0) + bar(31337);
+define double @bar(double %a) {
+entry:
+  %calltmp = call double @foo(double %a, double 4.000000e+00)
+  %calltmp1 = call double @bar(double 3.133700e+04)
+  %addtmp = fadd double %calltmp, %calltmp1
+  ret double %addtmp
+}
+Parsed a function definition.</code></pre>
+<p>This shows some function calls. Note that this function will take a long time to execute if you call it. In the future we’ll add conditional control flow to actually make recursion useful :).</p>
+<pre><code>ready&gt; extern cos(x);
+declare double @cos(double %x)
+Parsed an extern.
+ready&gt; cos(1.234);
+define double @1() {
+entry:
+  %calltmp = call double @cos(double 1.234000e+00)
+  ret double %calltmp
+}
+parsed a top-level expr</code></pre>
+<p>This shows an extern for the libm “cos” function, and a call to it.</p>
+<pre><code>ready&gt; ^D
+; ModuleID = &#39;my cool jit&#39;
+source_filename = &quot;my cool jit&quot;
+
+define double @0() {
+entry:
+  ret double 9.000000e+00
+}
+
+define double @foo(double %a, double %b) {
+entry:
+  %multmp = fmul double %a, %a
+  %multmp1 = fmul double 2.000000e+00, %a
+  %multmp2 = fmul double %multmp1, %b
+  %addtmp = fadd double %multmp, %multmp2
+  %multmp3 = fmul double %b, %b
+  %addtmp4 = fadd double %addtmp, %multmp3
+  ret double %addtmp4
+}
+
+define double @bar(double %a) {
+entry:
+  %calltmp = call double @foo(double %a, double 4.000000e+00)
+  %calltmp1 = call double @bar(double 3.133700e+04)
+  %addtmp = fadd double %calltmp, %calltmp1
+  ret double %addtmp
+}
+
+declare double @cos(double %x)
+
+define double @1() {
+entry:
+  %calltmp = call double @cos(double 1.234000e+00)
+  ret double %calltmp
+}</code></pre>
+<p>When you quit the current demo, it dumps out the IR for the entire module generated. Here you can see the big picture with all the functions referencing each other.</p>
+<p>This wraps up the third chapter of the Kaleidoscope tutorial. Up next, we’ll describe how to add <a href="#">JIT codegen and optimizer support</a> to this so we can actually start running code!</p>
+<h2 id="full-code-listing">Full Code listing</h2>
+<p>Here is the complete code listing for our running example, enhanced with the LLVM code generator. Because this uses the LLVM libraries, we need to link them in. To do this, we use the ocamlfind tool to to invoke ocaml compiler with the correct options:</p>
+<pre><code>$ ocamllex lexer.mll
+21 states, 930 transitions, table size 3846 bytes
+$ ocamlfind ocamlopt -package llvm,llvm.analysis -linkpkg -o toy lexer.ml ast.ml parser.ml codegen.ml toy.ml
+$ ./toy</code></pre>
+<p>Here is the code:</p>
+<p><code>lexer.mll</code>:</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>{</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> t =</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Commands *)</span></span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>  | Def | Extern</span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Primitives *)</span></span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a>  | Ident <span class="kw">of</span> <span class="dt">string</span> | Number <span class="kw">of</span> <span class="dt">float</span></span>
+<span id="cb22-7"><a href="#cb22-7" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Unknown *)</span></span>
+<span id="cb22-8"><a href="#cb22-8" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="kw">of</span> <span class="dt">char</span></span>
+<span id="cb22-9"><a href="#cb22-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-10"><a href="#cb22-10" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> pp ppf = <span class="kw">function</span></span>
+<span id="cb22-11"><a href="#cb22-11" aria-hidden="true" tabindex="-1"></a>  | Def      -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;def&quot;</span></span>
+<span id="cb22-12"><a href="#cb22-12" aria-hidden="true" tabindex="-1"></a>  | Extern   -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;extern&quot;</span></span>
+<span id="cb22-13"><a href="#cb22-13" aria-hidden="true" tabindex="-1"></a>  | Ident s  -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%s&quot;</span> s</span>
+<span id="cb22-14"><a href="#cb22-14" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%f&quot;</span> f</span>
+<span id="cb22-15"><a href="#cb22-15" aria-hidden="true" tabindex="-1"></a>  | Kwd c    -&gt; <span class="dt">Format</span>.fprintf ppf <span class="st">&quot;%c&quot;</span> c</span>
+<span id="cb22-16"><a href="#cb22-16" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb22-17"><a href="#cb22-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-18"><a href="#cb22-18" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> alpha = [<span class="ch">&#39;a&#39;</span>-<span class="ch">&#39;z&#39;</span> <span class="ch">&#39;A&#39;</span>-<span class="ch">&#39;Z&#39;</span>]</span>
+<span id="cb22-19"><a href="#cb22-19" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> digit = [<span class="ch">&#39;0&#39;</span>-<span class="ch">&#39;9&#39;</span>]</span>
+<span id="cb22-20"><a href="#cb22-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-21"><a href="#cb22-21" aria-hidden="true" tabindex="-1"></a>rule token = parse</span>
+<span id="cb22-22"><a href="#cb22-22" aria-hidden="true" tabindex="-1"></a>  | [<span class="ch">&#39; &#39;</span> <span class="ch">&#39;\t&#39;</span> <span class="ch">&#39;\r&#39;</span> <span class="ch">&#39;\n&#39;</span>]       { token lexbuf }</span>
+<span id="cb22-23"><a href="#cb22-23" aria-hidden="true" tabindex="-1"></a>  | <span class="st">&quot;def&quot;</span>                      { Def }</span>
+<span id="cb22-24"><a href="#cb22-24" aria-hidden="true" tabindex="-1"></a>  | <span class="st">&quot;extern&quot;</span>                   { Extern }</span>
+<span id="cb22-25"><a href="#cb22-25" aria-hidden="true" tabindex="-1"></a>  | alpha+ <span class="kw">as</span> s                { Ident s }</span>
+<span id="cb22-26"><a href="#cb22-26" aria-hidden="true" tabindex="-1"></a>  | digit+ (<span class="ch">&#39;.&#39;</span> digit<span class="er">*)</span>? <span class="kw">as</span> f  { Number (<span class="dt">float_of_string</span> f) }</span>
+<span id="cb22-27"><a href="#cb22-27" aria-hidden="true" tabindex="-1"></a>  | <span class="ch">&#39;#&#39;</span>                        { comment lexbuf }</span>
+<span id="cb22-28"><a href="#cb22-28" aria-hidden="true" tabindex="-1"></a>  | _ <span class="kw">as</span> c                     { Kwd c }</span>
+<span id="cb22-29"><a href="#cb22-29" aria-hidden="true" tabindex="-1"></a>  | eof                        { <span class="dt">raise</span> <span class="dt">End_of_file</span> }</span>
+<span id="cb22-30"><a href="#cb22-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-31"><a href="#cb22-31" aria-hidden="true" tabindex="-1"></a><span class="kw">and</span> comment = parse</span>
+<span id="cb22-32"><a href="#cb22-32" aria-hidden="true" tabindex="-1"></a>  | <span class="ch">&#39;\n&#39;</span>                       { token lexbuf }</span>
+<span id="cb22-33"><a href="#cb22-33" aria-hidden="true" tabindex="-1"></a>  | _                          { comment lexbuf }</span>
+<span id="cb22-34"><a href="#cb22-34" aria-hidden="true" tabindex="-1"></a>  | eof                        { <span class="dt">raise</span> <span class="dt">End_of_file</span> }</span></code></pre></div>
+<p><code>ast.ml</code>:</p>
+<div class="sourceCode" id="cb23"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="co">(*===----------------------------------------------------------------------===</span></span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a><span class="co"> * Abstract Syntax Tree (aka Parse Tree)</span></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a><span class="co"> *===----------------------------------------------------------------------===*)</span></span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a><span class="co">(* expr - Base type for all expression nodes. *)</span></span>
+<span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> expr =</span>
+<span id="cb23-7"><a href="#cb23-7" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for numeric literals like &quot;1.0&quot;. *)</span></span>
+<span id="cb23-8"><a href="#cb23-8" aria-hidden="true" tabindex="-1"></a>  | Number <span class="kw">of</span> <span class="dt">float</span></span>
+<span id="cb23-9"><a href="#cb23-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-10"><a href="#cb23-10" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for referencing a variable, like &quot;a&quot;. *)</span></span>
+<span id="cb23-11"><a href="#cb23-11" aria-hidden="true" tabindex="-1"></a>  | Variable <span class="kw">of</span> <span class="dt">string</span></span>
+<span id="cb23-12"><a href="#cb23-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-13"><a href="#cb23-13" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for a binary operator. *)</span></span>
+<span id="cb23-14"><a href="#cb23-14" aria-hidden="true" tabindex="-1"></a>  | Binary <span class="kw">of</span> <span class="dt">char</span> * expr * expr</span>
+<span id="cb23-15"><a href="#cb23-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-16"><a href="#cb23-16" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* variant for function calls. *)</span></span>
+<span id="cb23-17"><a href="#cb23-17" aria-hidden="true" tabindex="-1"></a>  | Call <span class="kw">of</span> <span class="dt">string</span> * expr <span class="dt">array</span></span>
+<span id="cb23-18"><a href="#cb23-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-19"><a href="#cb23-19" aria-hidden="true" tabindex="-1"></a><span class="co">(* proto - This type represents the &quot;prototype&quot; for a function, which captures</span></span>
+<span id="cb23-20"><a href="#cb23-20" aria-hidden="true" tabindex="-1"></a><span class="co"> * its name, and its argument names (thus implicitly the number of arguments the</span></span>
+<span id="cb23-21"><a href="#cb23-21" aria-hidden="true" tabindex="-1"></a><span class="co"> * function takes). *)</span></span>
+<span id="cb23-22"><a href="#cb23-22" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> proto = Prototype <span class="kw">of</span> <span class="dt">string</span> * <span class="dt">string</span> <span class="dt">array</span></span>
+<span id="cb23-23"><a href="#cb23-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-24"><a href="#cb23-24" aria-hidden="true" tabindex="-1"></a><span class="co">(* func - This type represents a function definition itself. *)</span></span>
+<span id="cb23-25"><a href="#cb23-25" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> func = Function <span class="kw">of</span> proto * expr</span></code></pre></div>
+<p>`parser.ml’:</p>
+<div class="sourceCode" id="cb24"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> token = Lexer.t =</span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Commands *)</span></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a>  | Def | Extern</span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Primitives *)</span></span>
+<span id="cb24-5"><a href="#cb24-5" aria-hidden="true" tabindex="-1"></a>  | Ident <span class="kw">of</span> <span class="dt">string</span> | Number <span class="kw">of</span> <span class="dt">float</span></span>
+<span id="cb24-6"><a href="#cb24-6" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Unknown *)</span></span>
+<span id="cb24-7"><a href="#cb24-7" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="kw">of</span> <span class="dt">char</span></span>
+<span id="cb24-8"><a href="#cb24-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-9"><a href="#cb24-9" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> token_pp = Lexer.pp</span>
+<span id="cb24-10"><a href="#cb24-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-11"><a href="#cb24-11" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> Error <span class="kw">of</span> token</span>
+<span id="cb24-12"><a href="#cb24-12" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> <span class="dt">Failure</span> <span class="kw">of</span> <span class="dt">string</span> * token</span>
+<span id="cb24-13"><a href="#cb24-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-14"><a href="#cb24-14" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-8&quot;</span>]</span>
+<span id="cb24-15"><a href="#cb24-15" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
+<span id="cb24-16"><a href="#cb24-16" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> Error t</span>
+<span id="cb24-17"><a href="#cb24-17" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;Unexpected token: %a&quot;</span> token_pp t))</span>
+<span id="cb24-18"><a href="#cb24-18" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ = <span class="dt">Printexc</span>.register_printer</span>
+<span id="cb24-19"><a href="#cb24-19" aria-hidden="true" tabindex="-1"></a>    (<span class="kw">function</span> <span class="dt">Failure</span> (message, token)</span>
+<span id="cb24-20"><a href="#cb24-20" aria-hidden="true" tabindex="-1"></a>      -&gt; <span class="dt">Some</span> (<span class="dt">Format</span>.asprintf <span class="st">&quot;%s: %a&quot;</span> message token_pp token))</span>
+<span id="cb24-21"><a href="#cb24-21" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;+8&quot;</span>]</span>
+<span id="cb24-22"><a href="#cb24-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-23"><a href="#cb24-23" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> ll1 = <span class="co">(* Hint: See LL1 grammars *)</span></span>
+<span id="cb24-24"><a href="#cb24-24" aria-hidden="true" tabindex="-1"></a>  { <span class="kw">mutable</span> lookahead : token <span class="dt">option</span>;</span>
+<span id="cb24-25"><a href="#cb24-25" aria-hidden="true" tabindex="-1"></a>    lexbuf            : <span class="dt">Lexing</span>.lexbuf;</span>
+<span id="cb24-26"><a href="#cb24-26" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb24-27"><a href="#cb24-27" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1 lexbuf = { lookahead = <span class="dt">None</span>; lexbuf }</span>
+<span id="cb24-28"><a href="#cb24-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-29"><a href="#cb24-29" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_string str = ll1 @@ <span class="dt">Lexing</span>.from_string str</span>
+<span id="cb24-30"><a href="#cb24-30" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ll1_from_channel ch = ll1 @@ <span class="dt">Lexing</span>.from_channel ch</span>
+<span id="cb24-31"><a href="#cb24-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-32"><a href="#cb24-32" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> next ll1 =</span>
+<span id="cb24-33"><a href="#cb24-33" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
+<span id="cb24-34"><a href="#cb24-34" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
+<span id="cb24-35"><a href="#cb24-35" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; ll1.lookahead &lt;- <span class="dt">None</span>; token</span>
+<span id="cb24-36"><a href="#cb24-36" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; Lexer.token lexbuf</span>
+<span id="cb24-37"><a href="#cb24-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-38"><a href="#cb24-38" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> peek ll1 =</span>
+<span id="cb24-39"><a href="#cb24-39" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> { lookahead; lexbuf } = ll1 <span class="kw">in</span></span>
+<span id="cb24-40"><a href="#cb24-40" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> lookahead <span class="kw">with</span></span>
+<span id="cb24-41"><a href="#cb24-41" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> token -&gt; token</span>
+<span id="cb24-42"><a href="#cb24-42" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">None</span> -&gt; <span class="kw">let</span> token = Lexer.token lexbuf <span class="kw">in</span></span>
+<span id="cb24-43"><a href="#cb24-43" aria-hidden="true" tabindex="-1"></a>    ll1.lookahead &lt;- <span class="dt">Some</span> token;</span>
+<span id="cb24-44"><a href="#cb24-44" aria-hidden="true" tabindex="-1"></a>    token</span>
+<span id="cb24-45"><a href="#cb24-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-46"><a href="#cb24-46" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> drop ll1 = <span class="dt">ignore</span> @@ next ll1</span>
+<span id="cb24-47"><a href="#cb24-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-48"><a href="#cb24-48" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> require ?msg token ll1 =</span>
+<span id="cb24-49"><a href="#cb24-49" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> token&#39; = next ll1 <span class="kw">in</span></span>
+<span id="cb24-50"><a href="#cb24-50" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> token &lt;&gt; token&#39; <span class="kw">then</span></span>
+<span id="cb24-51"><a href="#cb24-51" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> message =  <span class="kw">match</span> msg <span class="kw">with</span></span>
+<span id="cb24-52"><a href="#cb24-52" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> message -&gt; message</span>
+<span id="cb24-53"><a href="#cb24-53" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span> -&gt; <span class="dt">Format</span>.asprintf <span class="st">&quot;%a expected&quot;</span> token_pp token <span class="kw">in</span></span>
+<span id="cb24-54"><a href="#cb24-54" aria-hidden="true" tabindex="-1"></a>    <span class="dt">raise</span> @@ <span class="dt">Failure</span> (message, token&#39;)</span>
+<span id="cb24-55"><a href="#cb24-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-56"><a href="#cb24-56" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-4&quot;</span>]</span>
+<span id="cb24-57"><a href="#cb24-57" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_list <span class="kw">parser</span> ll1 =</span>
+<span id="cb24-58"><a href="#cb24-58" aria-hidden="true" tabindex="-1"></a>  <span class="kw">try</span></span>
+<span id="cb24-59"><a href="#cb24-59" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> e = <span class="kw">parser</span> ll1 <span class="kw">in</span></span>
+<span id="cb24-60"><a href="#cb24-60" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
+<span id="cb24-61"><a href="#cb24-61" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;,&#39;</span> -&gt; drop ll1; e :: parse_list <span class="kw">parser</span> ll1</span>
+<span id="cb24-62"><a href="#cb24-62" aria-hidden="true" tabindex="-1"></a>      | _  -&gt; [e]</span>
+<span id="cb24-63"><a href="#cb24-63" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb24-64"><a href="#cb24-64" aria-hidden="true" tabindex="-1"></a>  <span class="kw">with</span> Error _ -&gt; []</span>
+<span id="cb24-65"><a href="#cb24-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-66"><a href="#cb24-66" aria-hidden="true" tabindex="-1"></a><span class="co">(* primary</span></span>
+<span id="cb24-67"><a href="#cb24-67" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= numberexpr</span></span>
+<span id="cb24-68"><a href="#cb24-68" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= parenexpr</span></span>
+<span id="cb24-69"><a href="#cb24-69" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier</span></span>
+<span id="cb24-70"><a href="#cb24-70" aria-hidden="true" tabindex="-1"></a><span class="co">   ::= identifier(expr list)</span></span>
+<span id="cb24-71"><a href="#cb24-71" aria-hidden="true" tabindex="-1"></a><span class="co">*)</span></span>
+<span id="cb24-72"><a href="#cb24-72" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_primary parse_expr ll1 =</span>
+<span id="cb24-73"><a href="#cb24-73" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
+<span id="cb24-74"><a href="#cb24-74" aria-hidden="true" tabindex="-1"></a>  | Number f -&gt; Ast.Number f</span>
+<span id="cb24-75"><a href="#cb24-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-76"><a href="#cb24-76" aria-hidden="true" tabindex="-1"></a>  | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
+<span id="cb24-77"><a href="#cb24-77" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-78"><a href="#cb24-78" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
+<span id="cb24-79"><a href="#cb24-79" aria-hidden="true" tabindex="-1"></a>    expr</span>
+<span id="cb24-80"><a href="#cb24-80" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-81"><a href="#cb24-81" aria-hidden="true" tabindex="-1"></a>  | Ident v -&gt;</span>
+<span id="cb24-82"><a href="#cb24-82" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
+<span id="cb24-83"><a href="#cb24-83" aria-hidden="true" tabindex="-1"></a>      | Kwd <span class="ch">&#39;(&#39;</span> -&gt;</span>
+<span id="cb24-84"><a href="#cb24-84" aria-hidden="true" tabindex="-1"></a>        drop ll1;</span>
+<span id="cb24-85"><a href="#cb24-85" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> args = parse_list parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-86"><a href="#cb24-86" aria-hidden="true" tabindex="-1"></a>        require (Kwd <span class="ch">&#39;)&#39;</span>) ll1;</span>
+<span id="cb24-87"><a href="#cb24-87" aria-hidden="true" tabindex="-1"></a>        Ast.Call (v, <span class="dt">Array</span>.of_list args)</span>
+<span id="cb24-88"><a href="#cb24-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-89"><a href="#cb24-89" aria-hidden="true" tabindex="-1"></a>      | _ -&gt; Ast.Variable v</span>
+<span id="cb24-90"><a href="#cb24-90" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb24-91"><a href="#cb24-91" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-92"><a href="#cb24-92" aria-hidden="true" tabindex="-1"></a>  | Def | Extern | Kwd _ <span class="kw">as</span> token -&gt; <span class="dt">raise</span> @@ Error token</span>
+<span id="cb24-93"><a href="#cb24-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-94"><a href="#cb24-94" aria-hidden="true" tabindex="-1"></a><span class="co">(** Operator precedences *)</span></span>
+<span id="cb24-95"><a href="#cb24-95" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> precedence =</span>
+<span id="cb24-96"><a href="#cb24-96" aria-hidden="true" tabindex="-1"></a>  | Low</span>
+<span id="cb24-97"><a href="#cb24-97" aria-hidden="true" tabindex="-1"></a>  | Medium</span>
+<span id="cb24-98"><a href="#cb24-98" aria-hidden="true" tabindex="-1"></a>  | High</span>
+<span id="cb24-99"><a href="#cb24-99" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-100"><a href="#cb24-100" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> precedences: (precedence, <span class="dt">char</span> <span class="dt">list</span>) <span class="dt">Hashtbl</span>.t =</span>
+<span id="cb24-101"><a href="#cb24-101" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> hashtable =  <span class="dt">Hashtbl</span>.create <span class="dv">10</span> <span class="kw">in</span></span>
+<span id="cb24-102"><a href="#cb24-102" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Low    [ <span class="ch">&#39;&lt;&#39;</span> ];</span>
+<span id="cb24-103"><a href="#cb24-103" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable Medium [ <span class="ch">&#39;+&#39;</span>; <span class="ch">&#39;-&#39;</span> ];</span>
+<span id="cb24-104"><a href="#cb24-104" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Hashtbl</span>.add hashtable High   [ <span class="ch">&#39;*&#39;</span> ];</span>
+<span id="cb24-105"><a href="#cb24-105" aria-hidden="true" tabindex="-1"></a>  hashtable</span>
+<span id="cb24-106"><a href="#cb24-106" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-107"><a href="#cb24-107" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_binary precedence parse_prev parse_expr ll1 =</span>
+<span id="cb24-108"><a href="#cb24-108" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> chars = <span class="dt">Hashtbl</span>.find precedences precedence <span class="kw">in</span></span>
+<span id="cb24-109"><a href="#cb24-109" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> loop lhs ll1 =</span>
+<span id="cb24-110"><a href="#cb24-110" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> peek ll1 <span class="kw">with</span></span>
+<span id="cb24-111"><a href="#cb24-111" aria-hidden="true" tabindex="-1"></a>    | Kwd c <span class="kw">when</span> <span class="dt">List</span>.mem c chars -&gt;</span>
+<span id="cb24-112"><a href="#cb24-112" aria-hidden="true" tabindex="-1"></a>      drop ll1;</span>
+<span id="cb24-113"><a href="#cb24-113" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> rhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-114"><a href="#cb24-114" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> lhs = Ast.Binary (c, lhs, rhs) <span class="kw">in</span></span>
+<span id="cb24-115"><a href="#cb24-115" aria-hidden="true" tabindex="-1"></a>      loop lhs ll1</span>
+<span id="cb24-116"><a href="#cb24-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-117"><a href="#cb24-117" aria-hidden="true" tabindex="-1"></a>    | _ -&gt; lhs</span>
+<span id="cb24-118"><a href="#cb24-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-119"><a href="#cb24-119" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* handle the end of input *)</span></span>
+<span id="cb24-120"><a href="#cb24-120" aria-hidden="true" tabindex="-1"></a>    | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; lhs</span>
+<span id="cb24-121"><a href="#cb24-121" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
+<span id="cb24-122"><a href="#cb24-122" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> lhs = parse_prev parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-123"><a href="#cb24-123" aria-hidden="true" tabindex="-1"></a>  loop lhs ll1</span>
+<span id="cb24-124"><a href="#cb24-124" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-125"><a href="#cb24-125" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_high_precedence parse_expr ll1 =</span>
+<span id="cb24-126"><a href="#cb24-126" aria-hidden="true" tabindex="-1"></a>  parse_binary High parse_primary parse_expr ll1</span>
+<span id="cb24-127"><a href="#cb24-127" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-128"><a href="#cb24-128" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_medium_precedence parse_expr ll1 =</span>
+<span id="cb24-129"><a href="#cb24-129" aria-hidden="true" tabindex="-1"></a>  parse_binary Medium parse_high_precedence parse_expr ll1</span>
+<span id="cb24-130"><a href="#cb24-130" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-131"><a href="#cb24-131" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_low_precedence parse_expr ll1 =</span>
+<span id="cb24-132"><a href="#cb24-132" aria-hidden="true" tabindex="-1"></a>  parse_binary Low parse_medium_precedence parse_expr ll1</span>
+<span id="cb24-133"><a href="#cb24-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-134"><a href="#cb24-134" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> parse_expr ll1 = parse_low_precedence parse_expr ll1</span>
+<span id="cb24-135"><a href="#cb24-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-136"><a href="#cb24-136" aria-hidden="true" tabindex="-1"></a><span class="co">(* prototype</span></span>
+<span id="cb24-137"><a href="#cb24-137" aria-hidden="true" tabindex="-1"></a><span class="co"> *   ::= id &#39;(&#39; id* &#39;)&#39; *)</span></span>
+<span id="cb24-138"><a href="#cb24-138" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_prototype ll1 =</span>
+<span id="cb24-139"><a href="#cb24-139" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">rec</span> parse_params params ll1 =</span>
+<span id="cb24-140"><a href="#cb24-140" aria-hidden="true" tabindex="-1"></a>    <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
+<span id="cb24-141"><a href="#cb24-141" aria-hidden="true" tabindex="-1"></a>    | Kwd <span class="ch">&#39;)&#39;</span> -&gt; <span class="dt">List</span>.rev params</span>
+<span id="cb24-142"><a href="#cb24-142" aria-hidden="true" tabindex="-1"></a>    | Ident p -&gt; parse_params (p :: params) ll1</span>
+<span id="cb24-143"><a href="#cb24-143" aria-hidden="true" tabindex="-1"></a>    | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;) or name expected&quot;</span>, token)</span>
+<span id="cb24-144"><a href="#cb24-144" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
+<span id="cb24-145"><a href="#cb24-145" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> next ll1 <span class="kw">with</span></span>
+<span id="cb24-146"><a href="#cb24-146" aria-hidden="true" tabindex="-1"></a>  | Ident name -&gt;</span>
+<span id="cb24-147"><a href="#cb24-147" aria-hidden="true" tabindex="-1"></a>    require (Kwd <span class="ch">&#39;(&#39;</span>) ll1;</span>
+<span id="cb24-148"><a href="#cb24-148" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> params = parse_params [] ll1 <span class="kw">in</span></span>
+<span id="cb24-149"><a href="#cb24-149" aria-hidden="true" tabindex="-1"></a>    Ast.Prototype(name, <span class="dt">Array</span>.of_list params)</span>
+<span id="cb24-150"><a href="#cb24-150" aria-hidden="true" tabindex="-1"></a>  | token -&gt; <span class="dt">raise</span> @@ <span class="dt">Failure</span> (<span class="st">&quot;name expected&quot;</span>, token)</span>
+<span id="cb24-151"><a href="#cb24-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-152"><a href="#cb24-152" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_def ll1 =</span>
+<span id="cb24-153"><a href="#cb24-153" aria-hidden="true" tabindex="-1"></a>  require Def ll1;</span>
+<span id="cb24-154"><a href="#cb24-154" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = parse_prototype ll1 <span class="kw">in</span></span>
+<span id="cb24-155"><a href="#cb24-155" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-156"><a href="#cb24-156" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span>
+<span id="cb24-157"><a href="#cb24-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-158"><a href="#cb24-158" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_extern ll1 =</span>
+<span id="cb24-159"><a href="#cb24-159" aria-hidden="true" tabindex="-1"></a>  require Extern ll1;</span>
+<span id="cb24-160"><a href="#cb24-160" aria-hidden="true" tabindex="-1"></a>  parse_prototype ll1</span>
+<span id="cb24-161"><a href="#cb24-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-162"><a href="#cb24-162" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> parse_toplevel ll1 =</span>
+<span id="cb24-163"><a href="#cb24-163" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> proto = Ast.Prototype(<span class="st">&quot;&quot;</span>, [||]) <span class="kw">in</span></span>
+<span id="cb24-164"><a href="#cb24-164" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> expr = parse_expr ll1 <span class="kw">in</span></span>
+<span id="cb24-165"><a href="#cb24-165" aria-hidden="true" tabindex="-1"></a>  Ast.Function(proto, expr)</span></code></pre></div>
+<p><code>codegen.ml</code>:</p>
+<div class="sourceCode" id="cb25"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="co">(*===----------------------------------------------------------------------===</span></span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a><span class="co"> * Code Generation</span></span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true" tabindex="-1"></a><span class="co"> *===----------------------------------------------------------------------===*)</span></span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-5"><a href="#cb25-5" aria-hidden="true" tabindex="-1"></a><span class="kw">open</span> Llvm</span>
+<span id="cb25-6"><a href="#cb25-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-7"><a href="#cb25-7" aria-hidden="true" tabindex="-1"></a><span class="kw">exception</span> Error <span class="kw">of</span> <span class="dt">string</span></span>
+<span id="cb25-8"><a href="#cb25-8" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> error s = <span class="dt">raise</span> @@ Error s</span>
+<span id="cb25-9"><a href="#cb25-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-10"><a href="#cb25-10" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> context     = global_context ()</span>
+<span id="cb25-11"><a href="#cb25-11" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> the_module  = create_module context <span class="st">&quot;my cool jit&quot;</span></span>
+<span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> builder     = builder context</span>
+<span id="cb25-13"><a href="#cb25-13" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> double_type = double_type context</span>
+<span id="cb25-14"><a href="#cb25-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-15"><a href="#cb25-15" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> named_values : (<span class="dt">string</span>, llvalue) <span class="dt">Hashtbl</span>.t = <span class="dt">Hashtbl</span>.create <span class="dv">10</span></span>
+<span id="cb25-16"><a href="#cb25-16" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> find_by_name = <span class="dt">Hashtbl</span>.find named_values</span>
+<span id="cb25-17"><a href="#cb25-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-18"><a href="#cb25-18" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> codegen_expr = <span class="kw">function</span></span>
+<span id="cb25-19"><a href="#cb25-19" aria-hidden="true" tabindex="-1"></a>  | Ast.Number n      -&gt; const_float double_type n</span>
+<span id="cb25-20"><a href="#cb25-20" aria-hidden="true" tabindex="-1"></a>  | Ast.Variable name -&gt;</span>
+<span id="cb25-21"><a href="#cb25-21" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">try</span> find_by_name name <span class="kw">with</span></span>
+<span id="cb25-22"><a href="#cb25-22" aria-hidden="true" tabindex="-1"></a>      |  <span class="dt">Not_found</span> -&gt; error <span class="st">&quot;unknown variable name&quot;</span></span>
+<span id="cb25-23"><a href="#cb25-23" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb25-24"><a href="#cb25-24" aria-hidden="true" tabindex="-1"></a>  | Ast.Binary (op, lhs, rhs) -&gt;</span>
+<span id="cb25-25"><a href="#cb25-25" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> lhs_val = codegen_expr lhs <span class="kw">in</span></span>
+<span id="cb25-26"><a href="#cb25-26" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> rhs_val = codegen_expr rhs <span class="kw">in</span></span>
+<span id="cb25-27"><a href="#cb25-27" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">match</span> op <span class="kw">with</span></span>
+<span id="cb25-28"><a href="#cb25-28" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;+&#39;</span> -&gt; build_fadd lhs_val rhs_val <span class="st">&quot;addtmp&quot;</span> builder</span>
+<span id="cb25-29"><a href="#cb25-29" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;-&#39;</span> -&gt; build_fsub lhs_val rhs_val <span class="st">&quot;subtmp&quot;</span> builder</span>
+<span id="cb25-30"><a href="#cb25-30" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;*&#39;</span> -&gt; build_fmul lhs_val rhs_val <span class="st">&quot;multmp&quot;</span> builder</span>
+<span id="cb25-31"><a href="#cb25-31" aria-hidden="true" tabindex="-1"></a>      | <span class="ch">&#39;&lt;&#39;</span> -&gt;</span>
+<span id="cb25-32"><a href="#cb25-32" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* Conver bool 0/1 to double 0.0 or 1.0 *)</span></span>
+<span id="cb25-33"><a href="#cb25-33" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> i = build_fcmp Fcmp.Ult lhs_val rhs_val <span class="st">&quot;cmptmp&quot;</span> builder <span class="kw">in</span></span>
+<span id="cb25-34"><a href="#cb25-34" aria-hidden="true" tabindex="-1"></a>        build_uitofp i double_type <span class="st">&quot;booltmp&quot;</span> builder</span>
+<span id="cb25-35"><a href="#cb25-35" aria-hidden="true" tabindex="-1"></a>      | _ -&gt; error <span class="st">&quot;invalid binary operator&quot;</span></span>
+<span id="cb25-36"><a href="#cb25-36" aria-hidden="true" tabindex="-1"></a>    ) [@warning <span class="st">&quot;-8&quot;</span>]</span>
+<span id="cb25-37"><a href="#cb25-37" aria-hidden="true" tabindex="-1"></a>  | Ast.Call (callee, args) -&gt;</span>
+<span id="cb25-38"><a href="#cb25-38" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> callee = <span class="kw">match</span> lookup_function callee the_module <span class="kw">with</span></span>
+<span id="cb25-39"><a href="#cb25-39" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> callee -&gt; callee</span>
+<span id="cb25-40"><a href="#cb25-40" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span>        -&gt; error <span class="st">&quot;unknown function referenced&quot;</span></span>
+<span id="cb25-41"><a href="#cb25-41" aria-hidden="true" tabindex="-1"></a>    <span class="kw">in</span></span>
+<span id="cb25-42"><a href="#cb25-42" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> params = params callee <span class="kw">in</span></span>
+<span id="cb25-43"><a href="#cb25-43" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> <span class="dt">Array</span>.length params = <span class="dt">Array</span>.length args <span class="kw">then</span> ()</span>
+<span id="cb25-44"><a href="#cb25-44" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> error <span class="st">&quot;incorrect # of args passed&quot;</span>;</span>
+<span id="cb25-45"><a href="#cb25-45" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> args = <span class="dt">Array</span>.map codegen_expr args <span class="kw">in</span></span>
+<span id="cb25-46"><a href="#cb25-46" aria-hidden="true" tabindex="-1"></a>    build_call callee args <span class="st">&quot;calltmp&quot;</span> builder</span>
+<span id="cb25-47"><a href="#cb25-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-48"><a href="#cb25-48" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> codegen_proto = <span class="kw">function</span></span>
+<span id="cb25-49"><a href="#cb25-49" aria-hidden="true" tabindex="-1"></a>  | Ast.Prototype (name, args) -&gt;</span>
+<span id="cb25-50"><a href="#cb25-50" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> doubles = <span class="dt">Array</span>.make (<span class="dt">Array</span>.length args) double_type <span class="kw">in</span></span>
+<span id="cb25-51"><a href="#cb25-51" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> ft = function_type double_type doubles <span class="kw">in</span></span>
+<span id="cb25-52"><a href="#cb25-52" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> f = <span class="kw">match</span> lookup_function name the_module <span class="kw">with</span></span>
+<span id="cb25-53"><a href="#cb25-53" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">None</span> -&gt; declare_function name ft the_module</span>
+<span id="cb25-54"><a href="#cb25-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-55"><a href="#cb25-55" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* If &#39;f&#39; conflicted, there was already something named &#39;name&#39;. If it</span></span>
+<span id="cb25-56"><a href="#cb25-56" aria-hidden="true" tabindex="-1"></a><span class="co">         has a body, don&#39;t allow redefinition or reextern. *)</span></span>
+<span id="cb25-57"><a href="#cb25-57" aria-hidden="true" tabindex="-1"></a>      | <span class="dt">Some</span> f -&gt;</span>
+<span id="cb25-58"><a href="#cb25-58" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* If &#39;f&#39; already has a body, reject this. *)</span></span>
+<span id="cb25-59"><a href="#cb25-59" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> <span class="dt">Array</span>.length (basic_blocks f) == <span class="dv">0</span> <span class="kw">then</span> ()</span>
+<span id="cb25-60"><a href="#cb25-60" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> error <span class="st">&quot;redefinition of function&quot;</span>;</span>
+<span id="cb25-61"><a href="#cb25-61" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-62"><a href="#cb25-62" aria-hidden="true" tabindex="-1"></a>        <span class="co">(* If &#39;f&#39; took a different number of arguments, reject. *)</span></span>
+<span id="cb25-63"><a href="#cb25-63" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> <span class="dt">Array</span>.length (params f) == <span class="dt">Array</span>.length args <span class="kw">then</span> ()</span>
+<span id="cb25-64"><a href="#cb25-64" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> error <span class="st">&quot;redefinition of function with different # of args&quot;</span>;</span>
+<span id="cb25-65"><a href="#cb25-65" aria-hidden="true" tabindex="-1"></a>        f</span>
+<span id="cb25-66"><a href="#cb25-66" aria-hidden="true" tabindex="-1"></a>    <span class="kw">in</span></span>
+<span id="cb25-67"><a href="#cb25-67" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* set names for all the arguments *)</span></span>
+<span id="cb25-68"><a href="#cb25-68" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Array</span>.iteri</span>
+<span id="cb25-69"><a href="#cb25-69" aria-hidden="true" tabindex="-1"></a>      ( <span class="kw">fun</span> i a -&gt;</span>
+<span id="cb25-70"><a href="#cb25-70" aria-hidden="true" tabindex="-1"></a>          <span class="kw">let</span> n = args.(i) <span class="kw">in</span></span>
+<span id="cb25-71"><a href="#cb25-71" aria-hidden="true" tabindex="-1"></a>          set_value_name n a;</span>
+<span id="cb25-72"><a href="#cb25-72" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Hashtbl</span>.replace named_values n a )</span>
+<span id="cb25-73"><a href="#cb25-73" aria-hidden="true" tabindex="-1"></a>      (params f);</span>
+<span id="cb25-74"><a href="#cb25-74" aria-hidden="true" tabindex="-1"></a>    f</span>
+<span id="cb25-75"><a href="#cb25-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-76"><a href="#cb25-76" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> codegen_func = <span class="kw">function</span></span>
+<span id="cb25-77"><a href="#cb25-77" aria-hidden="true" tabindex="-1"></a>  | Ast.Function (proto, body) -&gt;</span>
+<span id="cb25-78"><a href="#cb25-78" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Hashtbl</span>.clear named_values;</span>
+<span id="cb25-79"><a href="#cb25-79" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> the_function = codegen_proto proto <span class="kw">in</span></span>
+<span id="cb25-80"><a href="#cb25-80" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-81"><a href="#cb25-81" aria-hidden="true" tabindex="-1"></a>    <span class="co">(* Create a new basic block to start insertion into. *)</span></span>
+<span id="cb25-82"><a href="#cb25-82" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> bb = append_block context <span class="st">&quot;entry&quot;</span> the_function <span class="kw">in</span></span>
+<span id="cb25-83"><a href="#cb25-83" aria-hidden="true" tabindex="-1"></a>    position_at_end bb builder;</span>
+<span id="cb25-84"><a href="#cb25-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-85"><a href="#cb25-85" aria-hidden="true" tabindex="-1"></a>    <span class="kw">try</span></span>
+<span id="cb25-86"><a href="#cb25-86" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> ret_val = codegen_expr body <span class="kw">in</span></span>
+<span id="cb25-87"><a href="#cb25-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-88"><a href="#cb25-88" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Finish off the function. *)</span></span>
+<span id="cb25-89"><a href="#cb25-89" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> _ = build_ret ret_val builder <span class="kw">in</span></span>
+<span id="cb25-90"><a href="#cb25-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-91"><a href="#cb25-91" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Validate the generated code, checking for consistency. *)</span></span>
+<span id="cb25-92"><a href="#cb25-92" aria-hidden="true" tabindex="-1"></a>      Llvm_analysis.assert_valid_function the_function;</span>
+<span id="cb25-93"><a href="#cb25-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-94"><a href="#cb25-94" aria-hidden="true" tabindex="-1"></a>      the_function</span>
+<span id="cb25-95"><a href="#cb25-95" aria-hidden="true" tabindex="-1"></a>    <span class="kw">with</span> e -&gt;</span>
+<span id="cb25-96"><a href="#cb25-96" aria-hidden="true" tabindex="-1"></a>      delete_function the_function;</span>
+<span id="cb25-97"><a href="#cb25-97" aria-hidden="true" tabindex="-1"></a>      <span class="dt">raise</span> e.</span></code></pre></div>
+<p><code>toy.ml</code>:</p>
+<div class="sourceCode" id="cb26"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>[@@@warning <span class="st">&quot;-4-10&quot;</span>]</span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a><span class="co">(* top ::= definition | external | expression | &#39;;&#39; *)</span></span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">rec</span> main_loop ll1 =</span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> Parser.peek ll1 <span class="kw">with</span></span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a>  | Lexer.Kwd <span class="ch">&#39;;&#39;</span> -&gt; Parser.drop ll1; main_loop ll1</span>
+<span id="cb26-6"><a href="#cb26-6" aria-hidden="true" tabindex="-1"></a>  | token -&gt;</span>
+<span id="cb26-7"><a href="#cb26-7" aria-hidden="true" tabindex="-1"></a>    ( <span class="kw">try</span> <span class="kw">match</span> token <span class="kw">with</span></span>
+<span id="cb26-8"><a href="#cb26-8" aria-hidden="true" tabindex="-1"></a>        | Lexer.Def -&gt;</span>
+<span id="cb26-9"><a href="#cb26-9" aria-hidden="true" tabindex="-1"></a>          <span class="kw">let</span> def = Parser.parse_def ll1 <span class="kw">in</span></span>
+<span id="cb26-10"><a href="#cb26-10" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed a function definition.</span><span class="ch">\n</span><span class="st">&quot;</span>;</span>
+<span id="cb26-11"><a href="#cb26-11" aria-hidden="true" tabindex="-1"></a>          Llvm.dump_value @@ Codegen.codegen_func def</span>
+<span id="cb26-12"><a href="#cb26-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-13"><a href="#cb26-13" aria-hidden="true" tabindex="-1"></a>        | Lexer.Extern -&gt;</span>
+<span id="cb26-14"><a href="#cb26-14" aria-hidden="true" tabindex="-1"></a>          <span class="kw">let</span> extern = Parser.parse_extern ll1 <span class="kw">in</span></span>
+<span id="cb26-15"><a href="#cb26-15" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;Parsed an extern.</span><span class="ch">\n</span><span class="st">&quot;</span>;</span>
+<span id="cb26-16"><a href="#cb26-16" aria-hidden="true" tabindex="-1"></a>          Llvm.dump_value @@ Codegen.codegen_proto extern</span>
+<span id="cb26-17"><a href="#cb26-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-18"><a href="#cb26-18" aria-hidden="true" tabindex="-1"></a>        | _ -&gt;</span>
+<span id="cb26-19"><a href="#cb26-19" aria-hidden="true" tabindex="-1"></a>          <span class="kw">let</span> toplevel = Parser.parse_toplevel ll1 <span class="kw">in</span></span>
+<span id="cb26-20"><a href="#cb26-20" aria-hidden="true" tabindex="-1"></a>          <span class="dt">Format</span>.printf <span class="st">&quot;parsed a top-level expr</span><span class="ch">\n</span><span class="st">&quot;</span>;</span>
+<span id="cb26-21"><a href="#cb26-21" aria-hidden="true" tabindex="-1"></a>          Llvm.dump_value @@ Codegen.codegen_func toplevel</span>
+<span id="cb26-22"><a href="#cb26-22" aria-hidden="true" tabindex="-1"></a>      <span class="kw">with</span></span>
+<span id="cb26-23"><a href="#cb26-23" aria-hidden="true" tabindex="-1"></a>      | Parser.Error _</span>
+<span id="cb26-24"><a href="#cb26-24" aria-hidden="true" tabindex="-1"></a>      | Parser.<span class="dt">Failure</span> _ <span class="kw">as</span> <span class="dt">exn</span> -&gt;</span>
+<span id="cb26-25"><a href="#cb26-25" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> error = <span class="dt">Printexc</span>.to_string <span class="dt">exn</span> <span class="kw">in</span></span>
+<span id="cb26-26"><a href="#cb26-26" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Format</span>.printf <span class="st">&quot;Error: %s</span><span class="ch">\n</span><span class="st">&quot;</span> error</span>
+<span id="cb26-27"><a href="#cb26-27" aria-hidden="true" tabindex="-1"></a>    );</span>
+<span id="cb26-28"><a href="#cb26-28" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
+<span id="cb26-29"><a href="#cb26-29" aria-hidden="true" tabindex="-1"></a>    main_loop ll1</span>
+<span id="cb26-30"><a href="#cb26-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-31"><a href="#cb26-31" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Clean exit on end of Lexer input *)</span></span>
+<span id="cb26-32"><a href="#cb26-32" aria-hidden="true" tabindex="-1"></a>  | <span class="kw">exception</span> <span class="dt">End_of_file</span> -&gt; ()</span>
+<span id="cb26-33"><a href="#cb26-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-34"><a href="#cb26-34" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> main () =</span>
+<span id="cb26-35"><a href="#cb26-35" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ll1 = Parser.ll1_from_channel <span class="dt">stdin</span> <span class="kw">in</span></span>
+<span id="cb26-36"><a href="#cb26-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-37"><a href="#cb26-37" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Format</span>.printf <span class="st">&quot;ready&gt; %!&quot;</span>;</span>
+<span id="cb26-38"><a href="#cb26-38" aria-hidden="true" tabindex="-1"></a>  main_loop ll1;</span>
+<span id="cb26-39"><a href="#cb26-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-40"><a href="#cb26-40" aria-hidden="true" tabindex="-1"></a>  Llvm.dump_module Codegen.the_module</span>
+<span id="cb26-41"><a href="#cb26-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-42"><a href="#cb26-42" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> () =</span>
+<span id="cb26-43"><a href="#cb26-43" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> !<span class="dt">Sys</span>.interactive <span class="kw">then</span> () <span class="kw">else</span> main ()</span></code></pre></div>
+<p><a href="#">Next: Adding JIT and optimizer support</a></p>
 </body>
 </html>
