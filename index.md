@@ -1,5 +1,4 @@
-% Hello
+% TBD
 %
 %
-
-* [LLVM Kaleidoscope tutorial](https://vrotaru.github.io/llvm-kaleidoscope)
+Maybe some other day
